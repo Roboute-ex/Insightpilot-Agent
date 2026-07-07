@@ -28,10 +28,13 @@ def _combined_text(trace: AnalysisTrace) -> str:
         trace.user_question,
         trace.identified_intent,
         trace.goal_mode,
+        trace.data_source_type,
         " ".join(trace.selected_metrics),
         " ".join(trace.generated_findings),
         " ".join(trace.caveats),
         str(trace.analysis_plan),
+        str(trace.table_metadata_summary),
+        " ".join(trace.schema_warnings),
         str(trace.reviewer_checks),
         " ".join(trace.errors),
     ]
@@ -39,7 +42,7 @@ def _combined_text(trace: AnalysisTrace) -> str:
 
 
 def _has_synthetic_disclaimer(text: str) -> bool:
-    return any(term in text for term in ("synthetic", "合成", "限制", "不代表真实", "仅用于学习"))
+    return any(term in text for term in ("synthetic data", "合成", "限制", "不代表真实", "仅用于学习"))
 
 
 def _has_causal_caveat(text: str) -> bool:
@@ -62,7 +65,14 @@ def review_analysis(trace: AnalysisTrace) -> ReviewerResult:
         "causal_has_caveat_when_needed": True,
         "errors_are_reported": isinstance(trace.errors, list),
         "no_overclaimed_causality": True,
-        "synthetic_data_disclaimer_present": _has_synthetic_disclaimer(text),
+        "synthetic_data_disclaimer_present": trace.data_source_type != "synthetic" or _has_synthetic_disclaimer(text),
+        "has_data_source": bool(trace.data_source_type),
+        "has_table_metadata": trace.data_source_type == "synthetic" or bool(trace.table_metadata_summary),
+        "has_schema_validation": trace.data_source_type == "synthetic" or bool(trace.schema_warnings or trace.table_metadata_summary),
+        "custom_data_limitations_reported": trace.data_source_type == "synthetic" or any(
+            term in text for term in ("自定义数据", "上传", "database", "数据库", "schema", "字段", "仅基于当前表")
+        ),
+        "unsafe_query_blocked": True,
     }
 
     is_experiment = trace.goal_mode == "experiment_analysis" or trace.identified_intent == "experiment_analysis"
@@ -105,6 +115,14 @@ def review_analysis(trace: AnalysisTrace) -> ReviewerResult:
             "缺少 synthetic data 声明。",
             "说明所有 demo 和结论均基于 synthetic data，不代表真实业务结论。",
         ),
+        "has_data_source": ("缺少 data_source_type。", "把数据来源写入 trace 和 report。"),
+        "has_table_metadata": ("缺少表结构 metadata。", "对上传文件或数据库查询结果记录表结构摘要。"),
+        "has_schema_validation": ("缺少 schema validation 结果。", "记录 schema warnings 或字段映射建议。"),
+        "custom_data_limitations_reported": (
+            "自定义数据缺少限制说明。",
+            "说明当前结果仅基于用户提供表结构，必要时需要指定日期、指标或维度字段。",
+        ),
+        "unsafe_query_blocked": ("SQL 安全检查上下文缺失。", "数据库模式下保留只读 SQL 安全边界说明。"),
     }
 
     for check_name, passed in checks.items():
@@ -137,6 +155,11 @@ def review_analysis(trace: AnalysisTrace) -> ReviewerResult:
         "errors_are_reported": 15,
         "no_overclaimed_causality": 25,
         "synthetic_data_disclaimer_present": 20,
+        "has_data_source": 8,
+        "has_table_metadata": 12,
+        "has_schema_validation": 10,
+        "custom_data_limitations_reported": 12,
+        "unsafe_query_blocked": 20,
     }
     for check_name, passed in checks.items():
         if not passed:

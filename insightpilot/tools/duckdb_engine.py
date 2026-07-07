@@ -6,6 +6,8 @@ import re
 
 import pandas as pd
 
+from insightpilot.ingestion.file_loader import sanitize_table_name
+
 try:
     import duckdb
 except ImportError as exc:  # pragma: no cover - dependency is declared for normal use
@@ -15,7 +17,22 @@ else:
     _DUCKDB_IMPORT_ERROR = None
 
 
-WRITE_TOKENS = {"drop", "delete", "insert", "update", "alter", "create", "truncate", "merge", "attach", "copy"}
+WRITE_TOKENS = {
+    "drop",
+    "delete",
+    "insert",
+    "update",
+    "alter",
+    "create",
+    "truncate",
+    "merge",
+    "replace",
+    "grant",
+    "revoke",
+    "attach",
+    "detach",
+    "copy",
+}
 SAFE_QUERY_TEMPLATES: dict[str, str] = {
     "daily_metric_by_date": (
         "SELECT date, SUM({metric}) AS metric_value "
@@ -40,18 +57,28 @@ class AnalyticsEngine:
 
     def register_tables(self, tables: dict[str, pd.DataFrame]) -> None:
         for name, frame in tables.items():
-            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            safe_name = sanitize_table_name(name)
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", safe_name):
                 raise ValueError(f"Unsafe table name: {name}")
-            self._connection.register(name, frame)
-            if name not in self._registered_tables:
-                self._registered_tables.append(name)
+            self._connection.register(safe_name, frame)
+            if safe_name not in self._registered_tables:
+                self._registered_tables.append(safe_name)
 
     def run_sql(self, query: str) -> pd.DataFrame:
         self._validate_query(query)
-        return self._connection.execute(query).fetchdf()
+        try:
+            return self._connection.execute(query).fetchdf()
+        except Exception as exc:
+            raise ValueError(
+                f"Query failed. Check that referenced tables exist. Registered tables: "
+                f"{', '.join(self.list_tables()) or 'none'}"
+            ) from exc
 
     def list_tables(self) -> list[str]:
         return sorted(self._registered_tables)
+
+    def list_registered_tables(self) -> list[str]:
+        return self.list_tables()
 
     def describe_table(self, table_name: str) -> pd.DataFrame:
         if table_name not in self._registered_tables:
@@ -71,6 +98,8 @@ class AnalyticsEngine:
         normalized = re.sub(r"--.*?$", " ", normalized, flags=re.MULTILINE)
         if not normalized:
             raise ValueError("SQL query is empty")
+        if ";" in normalized.rstrip(";") or normalized.count(";") > 1:
+            raise ValueError("Only a single read-only SQL statement is allowed")
         first_token = normalized.split()[0]
         if first_token not in {"select", "with"}:
             raise ValueError("Only SELECT or WITH queries are allowed")

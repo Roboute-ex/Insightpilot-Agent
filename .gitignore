@@ -7,9 +7,16 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
+.env
+.streamlit/secrets.toml
+*.db
+*.sqlite
+*.sqlite3
+data/
 dist/
 build/
 *.egg-info/
 reports/*.md
 reports/*.json
 !reports/__init__.py
+.tmp_tests/

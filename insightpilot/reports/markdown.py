@@ -24,6 +24,25 @@ def _bullet_lines(items: Any, fallback: str = "- 暂无") -> str:
     return "\n".join(f"- {item}" for item in values) if values else fallback
 
 
+def _table_metadata_lines(metadata: Any) -> str:
+    if not isinstance(metadata, dict) or not metadata:
+        return "- 暂无表结构摘要"
+    lines: list[str] = []
+    for table_name, item in metadata.items():
+        if not isinstance(item, dict):
+            continue
+        columns = item.get("columns", [])
+        if isinstance(columns, list):
+            column_preview = ", ".join(str(column) for column in columns[:8])
+        else:
+            column_preview = str(columns)
+        lines.append(
+            f"- {table_name}: rows={item.get('row_count', 'N/A')}, "
+            f"columns={item.get('column_count', 'N/A')}, fields={column_preview}"
+        )
+    return "\n".join(lines) if lines else "- 暂无表结构摘要"
+
+
 def _source_label(goal_mode_source: str) -> str:
     if goal_mode_source == "user_selected":
         return "用户选择"
@@ -54,6 +73,9 @@ def generate_markdown_report(result: dict[str, object]) -> str:
     findings = result.get("findings", [])
     caveats = result.get("caveats") or result.get("limitations") or []
     next_steps = result.get("next_steps", [])
+    data_source_type = str(result.get("data_source_type") or trace_dict.get("data_source_type") or "synthetic")
+    table_metadata = result.get("table_metadata") or trace_dict.get("table_metadata_summary") or {}
+    schema_warnings = result.get("schema_warnings") or trace_dict.get("schema_warnings") or []
 
     metric_lines = "\n".join(_format_metric(metric) for metric in _as_list(metrics)) or "- 未识别到明确指标"
     step_lines = _bullet_lines(plan_dict.get("analysis_steps", []))
@@ -82,6 +104,7 @@ def generate_markdown_report(result: dict[str, object]) -> str:
         f"- workflow_backend: {trace_dict.get('workflow_backend', workflow_backend)}",
         f"- route_taken_count: {len(route_taken)}",
         f"- errors_count: {len(_as_list(trace_dict.get('errors', [])))}",
+        f"- data_source_type: {data_source_type}",
     ]
 
     source_label = _source_label(goal_mode_source)
@@ -110,26 +133,35 @@ def generate_markdown_report(result: dict[str, object]) -> str:
             "## 4. Route Taken",
             route_lines,
             "",
-            "## 5. 识别指标",
+            "## 5. 数据来源",
+            f"- data_source_type: {data_source_type}",
+            "",
+            "## 6. 表结构摘要",
+            _table_metadata_lines(table_metadata),
+            "",
+            "## 7. Schema Warnings",
+            _bullet_lines(schema_warnings),
+            "",
+            "## 8. 识别指标",
             "涉及指标：",
             metric_lines,
             "",
-            "## 6. 分析计划",
+            "## 9. 分析计划",
             "\n".join(plan_lines),
             "",
-            "## 7. 核心发现",
+            "## 10. 核心发现",
             finding_lines,
             "",
-            "## 8. Reviewer 结果",
+            "## 11. Reviewer 结果",
             "\n".join(reviewer_lines),
             "",
-            "## 9. Trace 摘要",
+            "## 12. Trace 摘要",
             "\n".join(trace_summary_lines),
             "",
-            "## 10. 限制说明",
+            "## 13. 限制说明",
             caveat_lines,
             "",
-            "## 11. 下一步建议",
+            "## 14. 下一步建议",
             next_step_lines,
             "",
         ]

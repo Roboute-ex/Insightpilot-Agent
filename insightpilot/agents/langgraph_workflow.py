@@ -15,6 +15,7 @@ from insightpilot.agents.workflow import (
     WORKFLOW_BACKEND_LANGGRAPH,
     _build_result_from_state,
     _create_plan_node,
+    _load_data_source_node,
     _report_node,
     _resolve_metrics_node,
     _review_node,
@@ -60,6 +61,8 @@ def run_langgraph_workflow(
     question: str,
     tables: dict[str, pd.DataFrame],
     goal_mode: str = "auto",
+    data_source_type: str = "synthetic",
+    table_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run the optional LangGraph graph and return the standard workflow result."""
 
@@ -81,11 +84,18 @@ def run_langgraph_workflow(
     def route(values: GraphState) -> str:
         return _route_from_plan(_state(values))
 
-    initial_state = create_initial_state(question, tables, goal_mode)
+    initial_state = create_initial_state(
+        question,
+        tables,
+        goal_mode,
+        data_source_type=data_source_type,
+        table_metadata=table_metadata,
+    )
     initial_state.intermediate_results["workflow_backend"] = WORKFLOW_BACKEND_LANGGRAPH
 
     try:
         graph = StateGraph(GraphState)
+        graph.add_node("load_data_source", node(_load_data_source_node))
         graph.add_node("resolve_metrics", node(_resolve_metrics_node))
         graph.add_node("create_plan", node(_create_plan_node))
         graph.add_node("metric_diagnosis", node(_run_metric_diagnosis_node))
@@ -98,7 +108,8 @@ def run_langgraph_workflow(
         graph.add_node("review", node(_review_node))
         graph.add_node("report", node(_report_node))
 
-        graph.add_edge(START, "resolve_metrics")
+        graph.add_edge(START, "load_data_source")
+        graph.add_edge("load_data_source", "resolve_metrics")
         graph.add_edge("resolve_metrics", "create_plan")
         graph.add_conditional_edges(
             "create_plan",

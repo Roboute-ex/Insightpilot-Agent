@@ -51,6 +51,10 @@ class WorkflowState:
     intermediate_results: dict[str, Any] = field(default_factory=dict)
     findings: list[str] = field(default_factory=list)
     caveats: list[str] = field(default_factory=list)
+    data_source_type: str = "synthetic"
+    table_metadata: dict[str, Any] = field(default_factory=dict)
+    schema_warnings: list[str] = field(default_factory=list)
+    user_table_mode: bool = False
     reviewer_status: str = ""
     reviewer_issues: list[str] = field(default_factory=list)
     reviewer_suggestions: list[str] = field(default_factory=list)
@@ -83,6 +87,8 @@ def create_initial_state(
     question: str,
     tables: dict[str, pd.DataFrame] | None = None,
     goal_mode: str = "auto",
+    data_source_type: str = "synthetic",
+    table_metadata: dict[str, Any] | None = None,
 ) -> WorkflowState:
     """Create a safe initial state for a workflow run."""
 
@@ -94,4 +100,7 @@ def create_initial_state(
         goal_mode_display_name=get_goal_mode_display_name(normalized),
         goal_mode_source=source,
         tables_available=sorted((tables or {}).keys()),
+        data_source_type=data_source_type,
+        table_metadata=table_metadata or {},
+        user_table_mode=data_source_type != "synthetic",
     )

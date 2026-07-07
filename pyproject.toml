@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "insightpilot-agent"
-version = "0.2.0"
-description = "Synthetic-data-only analytics automation workbench with deterministic workflow, trace, reviewer, and optional LangGraph fallback."
+version = "0.3.0"
+description = "Synthetic-data-only analytics automation workbench with CSV, Excel, and read-only database ingestion."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -16,6 +16,8 @@ dependencies = [
   "statsmodels>=0.14",
   "scikit-learn>=1.3",
   "plotly>=5.18",
+  "openpyxl>=3.1",
+  "SQLAlchemy>=2.0",
 ]
 
 [project.optional-dependencies]

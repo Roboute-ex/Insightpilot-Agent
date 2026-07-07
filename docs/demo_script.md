@@ -1,29 +1,12 @@
 # Demo 演示脚本
 
-本演示只使用 synthetic data。所有输出用于学习研究、数据分析自动化和 Agent 工程化实践，不代表真实业务结论。
+本演示只使用 synthetic data 或当前会话内存中的用户提供表。不要提交真实数据、上传文件、数据库查询结果或凭据。
 
-## v0.2 展示步骤
+## Demo 1：Synthetic 交易转化异常分析
 
-1. 选择 demo 场景。
-2. 选择 Analysis Goal Mode，默认 `auto`。
-3. 选择 Workflow Backend，默认 Rule-based。
-4. 运行分析。
-5. 查看 route_taken，确认 workflow 节点路径。
-6. 查看 Reviewer Score、status、issues 和 suggestions。
-7. 查看 Trace ID、workflow_backend、caveats 和 errors。
-8. 查看 Markdown Report。
+数据来源：Synthetic demo data
 
-## Demo 1：交易转化异常分析
-
-推荐 goal_mode：`metric_diagnosis`
-
-问题：
-
-```text
-为什么昨天某城市订单量下降？
-```
-
-推荐命令：
+命令：
 
 ```powershell
 .\.venv\Scripts\python.exe examples/run_demo.py --scenario transaction --goal-mode metric_diagnosis
@@ -31,84 +14,117 @@
 
 预期输出：
 
-- 订单量相对前 7 日均值的变化。
-- 异常严重度。
-- city、channel、user_segment、device、merchant_type 的贡献度排序。
-- route_taken 包含 `route_metric_diagnosis`、`run_anomaly`、`run_attribution`。
+- route_taken 包含 `load_data_source`、`validate_tables`、`infer_schema`、`route_metric_diagnosis`、`run_anomaly`、`run_attribution`。
 - Reviewer Score 为 PASS 区间。
+- Markdown Report 包含数据来源、表结构摘要和限制说明。
 
-解释重点：
+注意事项：
 
 - synthetic data 中目标日期的 South City 被注入订单下降信号。
 - 归因排序用于定位优先排查方向，不代表最终因果结论。
 
-## Demo 2：内容消费与实验分析
+## Demo 2：Upload CSV
 
-推荐 goal_mode：`experiment_analysis` 或 `content_performance`
+数据来源：Upload CSV / Excel
 
-问题：
+操作步骤：
 
-```text
-新策略是否提升了内容完播率？
-```
+1. 准备一个 tiny synthetic CSV，例如包含 `date,value,city` 三列。
+2. 在 Streamlit 侧边栏选择 `Upload CSV / Excel`。
+3. 上传 CSV。
+4. 修改 table name。
+5. 查看 preview、schema mapping 和 warnings。
+6. 选择 `growth_trend`。
+7. 运行分析。
 
-推荐命令：
+CLI 示例：
 
 ```powershell
-.\.venv\Scripts\python.exe examples/run_demo.py --scenario content --goal-mode experiment_analysis
+.\.venv\Scripts\python.exe examples/run_demo.py --data-source file --input-file data/sample.csv --table-name uploaded_table --goal-mode growth_trend
 ```
 
 预期输出：
 
-- 对照组和实验组 completion_rate。
-- absolute_lift、relative_lift、p_value、confidence interval。
-- sample_size 与分层效果。
-- route_taken 包含 `route_experiment_analysis` 和 `run_experiment`。
-- Reviewer 结果包含实验检查项。
+- data_source 为 `uploaded_files`。
+- route_taken 包含 `generic_analysis_fallback`。
+- 如果识别到日期列和数值列，会输出通用趋势或异常摘要。
 
-解释重点：
+注意事项：
 
-- experiments 表中 treatment 组被注入完播率提升信号。
-- p_value < 0.05 只说明 synthetic 样本中存在统计显著差异。
-- 仍需关注样本量和分层稳定性。
+- 上传文件默认只在当前会话内存中处理。
+- 不要把上传文件提交到仓库。
 
-## Demo 3：体验质量分析
+## Demo 3：Upload Excel
 
-推荐 goal_mode：`live_quality`
+数据来源：Upload CSV / Excel
 
-问题：
+操作步骤：
 
-```text
-请定位直播体验异常的主要维度。
-```
+1. 准备一个 tiny synthetic Excel 文件。
+2. 在 Streamlit 上传 Excel。
+3. 选择 sheet。
+4. 修改 table name。
+5. 查看 schema mapping。
+6. 运行分析。
 
-推荐命令：
+CLI 示例：
 
 ```powershell
+.\.venv\Scripts\python.exe examples/run_demo.py --data-source file --input-file data/sample.xlsx --sheet-name Sheet1 --table-name uploaded_table --goal-mode growth_trend
+```
+
+预期输出：
+
+- Excel sheet 被读取为一张 pandas DataFrame。
+- 报告包含表结构摘要和 schema warnings。
+
+注意事项：
+
+- Excel 读取依赖 openpyxl。
+- 如果 sheet 为空，会显示友好错误或 warning。
+
+## Demo 4：SQLite Query
+
+数据来源：Database query
+
+操作步骤：
+
+1. 准备一个 tiny synthetic SQLite 文件或使用测试生成数据。
+2. 在 Streamlit 选择 `Database query`。
+3. 输入 `sqlite:///path/to/local.db`。
+4. 输入只读 SQL，例如 `SELECT * FROM metrics`。
+5. 点击 `Test Query / Load Data`。
+6. 查看 preview、schema mapping 和 warnings。
+7. 运行分析。
+
+CLI 示例：
+
+```powershell
+.\.venv\Scripts\python.exe examples/run_demo.py --data-source database --database-url sqlite:///local.db --query "SELECT * FROM metrics" --table-name db_table --goal-mode growth_trend
+```
+
+预期输出：
+
+- data_source 为 `database`。
+- unsafe SQL 会被拒绝，不执行。
+- report 不展示明文密码。
+
+注意事项：
+
+- database query 只允许单条 SELECT/WITH。
+- 不要提交真实数据库凭据或本地数据库文件。
+
+## Demo 5：Synthetic 内容与体验质量
+
+命令：
+
+```powershell
+.\.venv\Scripts\python.exe examples/run_demo.py --scenario content --goal-mode experiment_analysis
 .\.venv\Scripts\python.exe examples/run_demo.py --scenario live --goal-mode live_quality
 ```
 
 预期输出：
 
-- stutter_rate、watch_time、interaction_rate 的变化。
-- device、network_type、city、hour_bucket 的贡献度排序。
-- route_taken 包含 `route_live_quality`、`run_live_quality`、`run_attribution`。
-- 风险提示、限制说明和下一步建议。
-
-解释重点：
-
-- synthetic data 中目标日期的 Tablet 或 Cellular 流量被注入卡顿率上升信号。
-- 体验质量需要同时看卡顿、停留和互动。
-- 相关性不能直接解释为因果关系。
-
-## Optional LangGraph fallback 展示
-
-```powershell
-.\.venv\Scripts\python.exe examples/run_demo.py --scenario transaction --goal-mode metric_diagnosis --use-langgraph
-```
-
-预期行为：
-
-- 如果 LangGraph 可用，workflow_backend 显示 `langgraph`。
-- 如果 LangGraph 未安装或 API 不兼容，workflow_backend 显示 `langgraph_unavailable_fallback`。
-- 无论是否安装 LangGraph，命令不应要求 API key，也不应接入在线 LLM。
+- content 场景包含 p_value、sample_size 和 reviewer 实验检查。
+- live 场景包含体验质量指标和维度归因。
+- 两个场景继续使用 synthetic data，不受 v0.3 ingestion 影响。

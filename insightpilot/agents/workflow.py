@@ -15,6 +15,8 @@ from insightpilot.agents.reviewer import review_analysis
 from insightpilot.agents.state import WorkflowState, create_initial_state
 from insightpilot.agents.trace import AnalysisTrace
 from insightpilot.config import REPORT_LIMITATION
+from insightpilot.ingestion.schema_mapper import infer_schema_mapping
+from insightpilot.ingestion.validation import validate_tables_for_workflow
 from insightpilot.metrics.dictionary import MetricDefinition
 from insightpilot.metrics.resolver import resolve_metrics_from_question
 from insightpilot.planning.planner import AnalysisPlan, create_analysis_plan
@@ -31,6 +33,16 @@ DEFAULT_CAVEATS = [
     "相关性不能直接解释为因果关系；实验和轻量调整结果仍需谨慎解读。",
     "rule-based planner 依赖 deterministic keyword rules，复杂表达需要继续扩展规则覆盖。",
 ]
+
+CUSTOM_DATA_CAVEATS = [
+    "自定义数据仅在当前会话内存中分析，默认不写入仓库。",
+    "当前通用分析基于字段类型和列名规则推断，必要时需要用户指定日期列、指标列或维度列。",
+    "上传文件或数据库查询结果不应被描述为真实业务结论，分析仍需结合数据口径复核。",
+]
+CUSTOM_REPORT_LIMITATION = (
+    "限制说明：本次分析基于当前会话内存中的自定义表，未写入仓库；"
+    "字段含义和数据口径需要用户复核，相关性不能直接解释为因果关系。"
+)
 
 
 def _metric_payload(metrics: list[MetricDefinition]) -> list[dict[str, object]]:
@@ -79,6 +91,57 @@ def _append_unique(items: list[str], new_items: list[str]) -> None:
     for item in new_items:
         if item and item not in items:
             items.append(item)
+
+
+def _metadata_from_tables(tables: dict[str, pd.DataFrame]) -> dict[str, dict[str, Any]]:
+    metadata: dict[str, dict[str, Any]] = {}
+    for name, df in tables.items():
+        schema_mapping = infer_schema_mapping(name, df).to_dict()
+        metadata[name] = {
+            "source_type": "in_memory",
+            "source_name": name,
+            "row_count": int(len(df)),
+            "column_count": int(len(df.columns)),
+            "columns": [str(column) for column in df.columns],
+            "schema_mapping": schema_mapping,
+            "warnings": validate_tables_for_workflow({name: df}),
+        }
+    return metadata
+
+
+def _summarize_table_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    for table_name, item in metadata.items():
+        if not isinstance(item, dict):
+            continue
+        summary[table_name] = {
+            "source_type": item.get("source_type"),
+            "source_name": item.get("source_name"),
+            "row_count": item.get("row_count"),
+            "column_count": item.get("column_count"),
+            "columns": item.get("columns", []),
+            "schema_mapping": item.get("schema_mapping", {}),
+            "warnings": item.get("warnings", []),
+        }
+    return summary
+
+
+def _first_custom_table(state: WorkflowState, tables: dict[str, pd.DataFrame]) -> tuple[str, pd.DataFrame] | None:
+    if not tables:
+        return None
+    for name, df in tables.items():
+        mapping = state.table_metadata.get(name, {}).get("schema_mapping", {})
+        if mapping.get("possible_metric_columns"):
+            return name, df
+    return next(iter(tables.items()))
+
+
+def _mapping_for_table(state: WorkflowState, table_name: str, df: pd.DataFrame) -> dict[str, Any]:
+    metadata = state.table_metadata.get(table_name, {})
+    mapping = metadata.get("schema_mapping") if isinstance(metadata, dict) else {}
+    if isinstance(mapping, dict) and mapping:
+        return mapping
+    return infer_schema_mapping(table_name, df).to_dict()
 
 
 def _record_query(
@@ -164,7 +227,7 @@ def _set_node_outputs(
     state.intermediate_results["artifacts"] = _round_value(artifacts)
     state.intermediate_results["next_steps"] = next_steps
     state.findings = findings
-    _append_unique(state.caveats, DEFAULT_CAVEATS)
+    _append_unique(state.caveats, DEFAULT_CAVEATS if state.data_source_type == "synthetic" else CUSTOM_DATA_CAVEATS)
     if caveats:
         _append_unique(state.caveats, caveats)
 
@@ -179,6 +242,38 @@ def _resolve_metrics_node(
     state.selected_metrics = [metric.metric_name for metric in metrics]
     state.intermediate_results["metrics"] = _metric_payload(metrics)
     state.tables_available = sorted(tables.keys())
+    return state
+
+
+def _load_data_source_node(
+    state: WorkflowState,
+    tables: dict[str, pd.DataFrame],
+    engine: AnalyticsEngine | None = None,
+) -> WorkflowState:
+    state.add_route("load_data_source")
+    state.tables_available = sorted(tables.keys())
+    if not state.table_metadata:
+        state.table_metadata = _metadata_from_tables(tables)
+    state.add_route("validate_tables")
+    state.schema_warnings = validate_tables_for_workflow(tables)
+    state.add_route("infer_schema")
+    for table_name, df in tables.items():
+        metadata = state.table_metadata.setdefault(
+            table_name,
+            {
+                "source_type": state.data_source_type,
+                "source_name": table_name,
+                "row_count": int(len(df)),
+                "column_count": int(len(df.columns)),
+                "columns": [str(column) for column in df.columns],
+            },
+        )
+        metadata.setdefault("schema_mapping", infer_schema_mapping(table_name, df).to_dict())
+        metadata.setdefault("warnings", validate_tables_for_workflow({table_name: df}))
+    if state.schema_warnings:
+        _append_unique(state.caveats, state.schema_warnings)
+    if state.user_table_mode:
+        _append_unique(state.caveats, CUSTOM_DATA_CAVEATS)
     return state
 
 
@@ -588,6 +683,141 @@ def _run_periodic_report_node(
     return state
 
 
+def _profile_custom_tables(state: WorkflowState, tables: dict[str, pd.DataFrame]) -> dict[str, Any]:
+    profiles: dict[str, Any] = {}
+    for table_name, df in tables.items():
+        mapping = _mapping_for_table(state, table_name, df)
+        profiles[table_name] = {
+            "row_count": int(len(df)),
+            "column_count": int(len(df.columns)),
+            "columns": [str(column) for column in df.columns],
+            "numeric_columns": mapping.get("detected_numeric_columns", []),
+            "date_columns": mapping.get("detected_date_columns", []),
+            "categorical_columns": mapping.get("detected_categorical_columns", []),
+            "warnings": state.table_metadata.get(table_name, {}).get("warnings", []),
+        }
+    return profiles
+
+
+def _custom_date_metric_frame(df: pd.DataFrame, date_col: str, metric_col: str) -> pd.DataFrame:
+    working = df[[date_col, metric_col]].copy()
+    working[date_col] = pd.to_datetime(working[date_col], errors="coerce")
+    working[metric_col] = pd.to_numeric(working[metric_col], errors="coerce")
+    working = working.dropna(subset=[date_col, metric_col])
+    return working.groupby(date_col, as_index=False)[metric_col].sum().sort_values(date_col)
+
+
+def _find_experiment_columns(df: pd.DataFrame) -> tuple[str | None, str | None]:
+    group_col: str | None = None
+    metric_col: str | None = None
+    for column in df.columns:
+        values = set(df[column].dropna().astype(str).str.lower().unique())
+        if {"control", "treatment"}.issubset(values):
+            group_col = str(column)
+            break
+    for column in df.columns:
+        if pd.api.types.is_numeric_dtype(df[column]) and str(column) != group_col:
+            metric_col = str(column)
+            break
+    return group_col, metric_col
+
+
+def _run_generic_analysis_node(
+    state: WorkflowState,
+    tables: dict[str, pd.DataFrame],
+    engine: AnalyticsEngine | None = None,
+) -> WorkflowState:
+    state.add_route("generic_analysis_fallback")
+    profiles = _profile_custom_tables(state, tables)
+    selected = _first_custom_table(state, tables)
+    if selected is None:
+        state.errors.append("No tables available for custom data workflow.")
+        _set_node_outputs(
+            state,
+            summary="没有可用表，无法执行自定义数据分析。",
+            findings=["没有可用表，请先上传 CSV/Excel 或加载数据库查询结果。", REPORT_LIMITATION],
+            artifacts={"table_profiles": profiles},
+            next_steps=["提供至少一张包含可分析字段的表。"],
+            caveats=CUSTOM_DATA_CAVEATS,
+        )
+        return state
+
+    table_name, df = selected
+    mapping = _mapping_for_table(state, table_name, df)
+    date_columns = list(mapping.get("detected_date_columns", []))
+    metric_columns = list(mapping.get("possible_metric_columns") or mapping.get("detected_numeric_columns", []))
+    dimension_columns = list(mapping.get("possible_dimension_columns") or mapping.get("detected_categorical_columns", []))
+    route = _route_from_plan(state)
+    findings: list[str] = [
+        f"数据来源为 {state.data_source_type}，当前使用表 {table_name}（{len(df)} 行，{len(df.columns)} 列）进行通用分析。",
+    ]
+    next_steps = [
+        "如需更稳定的诊断，请明确日期列、指标列和优先维度字段。",
+        "复核上传文件或数据库查询结果的字段口径、缺失率和时间范围。",
+    ]
+    artifacts: dict[str, Any] = {"table_profiles": profiles, "selected_table": table_name}
+    caveats = list(CUSTOM_DATA_CAVEATS)
+
+    if route in {"metric_diagnosis", "growth_trend", "periodic_report"}:
+        if date_columns and metric_columns:
+            date_col = date_columns[0]
+            metric_col = metric_columns[0]
+            state.add_route("run_generic_trend")
+            metric_frame = _custom_date_metric_frame(df, date_col, metric_col)
+            artifacts["generic_trend"] = _round_value(metric_frame.tail(20).to_dict(orient="records"))
+            if len(metric_frame) >= 8:
+                state.add_route("run_generic_anomaly")
+                anomaly = detect_metric_anomaly(metric_frame, metric_col, date_col=date_col)
+                artifacts["generic_anomaly"] = _round_value(anomaly)
+                findings.append(
+                    f"{metric_col} 最新日期相对前 7 日均值变化 {float(anomaly['relative_change']):.2%}，severity={anomaly['severity']}。"
+                )
+            else:
+                findings.append(f"{metric_col} 已按 {date_col} 聚合，但可用日期少于 8 个，暂不输出异常结论。")
+                caveats.append("日期样本不足，异常检测退化为趋势摘要。")
+            if dimension_columns:
+                findings.append(f"可作为后续拆解的候选维度包括：{', '.join(dimension_columns[:5])}。")
+        else:
+            findings.append("未同时识别到日期列和数值指标列，已退化为表结构 profile 摘要。")
+            caveats.append("需要指定日期列和数值指标列后才能执行通用趋势或异常检测。")
+    elif route == "experiment_analysis":
+        group_col, metric_col = _find_experiment_columns(df)
+        if group_col and metric_col:
+            state.add_route("run_generic_experiment")
+            ab_result = analyze_ab_test(df, group_col, metric_col, metric_type="mean")
+            artifacts["generic_ab_test"] = _round_value(ab_result)
+            findings.extend(
+                [
+                    f"识别到实验分组字段 {group_col} 和指标字段 {metric_col}。",
+                    f"p_value={float(ab_result['p_value']):.6f}，sample_size={ab_result['sample_size']}。",
+                    str(ab_result["conclusion"]),
+                ]
+            )
+        else:
+            findings.append("未识别到包含 control/treatment 的分组字段和数值指标，无法执行通用实验评估。")
+            caveats.append("实验分析需要明确 group 字段且包含 control/treatment，以及一个数值 outcome 字段。")
+    elif route == "causal_exploration":
+        findings.append("自定义数据的轻量因果探索需要明确 treatment、outcome 和控制变量，当前仅输出 schema profile。")
+        caveats.append("未指定 treatment/outcome 字段时，不执行轻量因果估计，避免误读相关性。")
+    else:
+        findings.append("当前目标模式缺少标准 demo 字段，已转为通用表结构和字段候选摘要。")
+        if metric_columns:
+            findings.append(f"候选指标字段：{', '.join(metric_columns[:5])}。")
+        if dimension_columns:
+            findings.append(f"候选维度字段：{', '.join(dimension_columns[:5])}。")
+
+    findings.append(CUSTOM_REPORT_LIMITATION)
+    _set_node_outputs(
+        state,
+        summary="自定义数据通用分析已完成。",
+        findings=findings,
+        artifacts=artifacts,
+        next_steps=next_steps,
+        caveats=caveats,
+    )
+    return state
+
+
 def _review_node(
     state: WorkflowState,
     tables: dict[str, pd.DataFrame],
@@ -623,6 +853,9 @@ def _build_trace_from_state(state: WorkflowState) -> AnalysisTrace:
         goal_mode=state.goal_mode,
         goal_mode_display_name=state.goal_mode_display_name,
         goal_mode_source=state.goal_mode_source,
+        data_source_type=state.data_source_type,
+        table_metadata_summary=_summarize_table_metadata(state.table_metadata),
+        schema_warnings=state.schema_warnings,
         identified_intent=state.intent,
         selected_metrics=state.selected_metrics,
         analysis_plan=state.analysis_plan,
@@ -660,6 +893,10 @@ def _build_result_from_state(state: WorkflowState) -> dict[str, Any]:
         "workflow_backend": workflow_backend,
         "route_taken": state.route_taken,
         "errors": state.errors,
+        "data_source_type": state.data_source_type,
+        "table_metadata": _summarize_table_metadata(state.table_metadata),
+        "schema_warnings": state.schema_warnings,
+        "user_table_mode": state.user_table_mode,
     }
 
 
@@ -668,6 +905,8 @@ def _run_routed_analysis(
     tables: dict[str, pd.DataFrame],
     engine: AnalyticsEngine | None,
 ) -> WorkflowState:
+    if state.user_table_mode:
+        return _run_generic_analysis_node(state, tables, engine)
     route = _route_from_plan(state)
     route_nodes: dict[str, Callable[[WorkflowState, dict[str, pd.DataFrame], AnalyticsEngine | None], WorkflowState]] = {
         "metric_diagnosis": _run_metric_diagnosis_node,
@@ -688,14 +927,17 @@ def _run_rule_based_workflow(
     workflow_backend: str = WORKFLOW_BACKEND_RULE_BASED,
     initial_caveats: list[str] | None = None,
     initial_errors: list[str] | None = None,
+    data_source_type: str = "synthetic",
+    table_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    state = create_initial_state(question, tables, goal_mode)
+    state = create_initial_state(question, tables, goal_mode, data_source_type=data_source_type, table_metadata=table_metadata)
     state.intermediate_results["workflow_backend"] = workflow_backend
     if initial_caveats:
         _append_unique(state.caveats, initial_caveats)
     if initial_errors:
         _append_unique(state.errors, initial_errors)
     engine = _safe_engine(tables)
+    _load_data_source_node(state, tables, engine)
     _resolve_metrics_node(state, tables, engine)
     _create_plan_node(state, tables, engine)
     _run_routed_analysis(state, tables, engine)
@@ -713,15 +955,23 @@ def run_agent_analysis(
     tables: dict[str, pd.DataFrame],
     goal_mode: str = "auto",
     use_langgraph: bool = False,
+    data_source_type: str = "synthetic",
+    table_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run the deterministic workflow over synthetic tables."""
 
-    if use_langgraph:
+    if use_langgraph and data_source_type == "synthetic":
         if _langgraph_available():
             try:
                 from insightpilot.agents.langgraph_workflow import run_langgraph_workflow
 
-                return run_langgraph_workflow(question, tables, goal_mode=goal_mode)
+                return run_langgraph_workflow(
+                    question,
+                    tables,
+                    goal_mode=goal_mode,
+                    data_source_type=data_source_type,
+                    table_metadata=table_metadata,
+                )
             except Exception as exc:
                 return _run_rule_based_workflow(
                     question,
@@ -730,6 +980,8 @@ def run_agent_analysis(
                     workflow_backend=WORKFLOW_BACKEND_LANGGRAPH_FALLBACK,
                     initial_caveats=["Optional LangGraph workflow 不可用，已自动回退到 rule-based workflow。"],
                     initial_errors=[f"LangGraph workflow fallback: {exc}"],
+                    data_source_type=data_source_type,
+                    table_metadata=table_metadata,
                 )
         return _run_rule_based_workflow(
             question,
@@ -737,6 +989,8 @@ def run_agent_analysis(
             goal_mode=goal_mode,
             workflow_backend=WORKFLOW_BACKEND_LANGGRAPH_FALLBACK,
             initial_caveats=["Optional LangGraph 未安装，已自动回退到 rule-based workflow。"],
+            data_source_type=data_source_type,
+            table_metadata=table_metadata,
         )
 
     return _run_rule_based_workflow(
@@ -744,6 +998,8 @@ def run_agent_analysis(
         tables,
         goal_mode=goal_mode,
         workflow_backend=WORKFLOW_BACKEND_RULE_BASED,
+        data_source_type=data_source_type,
+        table_metadata=table_metadata,
     )
 
 
@@ -753,6 +1009,7 @@ __all__ = [
     "WORKFLOW_BACKEND_RULE_BASED",
     "_create_plan_node",
     "_langgraph_available",
+    "_load_data_source_node",
     "_report_node",
     "_resolve_metrics_node",
     "_review_node",
@@ -762,6 +1019,7 @@ __all__ = [
     "_run_experiment_node",
     "_run_growth_trend_node",
     "_run_live_quality_node",
+    "_run_generic_analysis_node",
     "_run_metric_diagnosis_node",
     "_run_periodic_report_node",
     "run_agent_analysis",
