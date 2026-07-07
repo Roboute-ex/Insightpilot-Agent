@@ -14,9 +14,14 @@ def test_reviewer_returns_pass_for_complete_trace() -> None:
         goal_mode_display_name="指标波动诊断",
         goal_mode_source="user_selected",
         executed_queries=["SELECT date, SUM(orders) FROM daily_metrics GROUP BY date"],
+        route_taken=["resolve_metrics", "create_plan", "route_metric_diagnosis", "run_anomaly", "review"],
         generated_findings=["限制说明：synthetic data only，相关性不能直接解释为因果关系。"],
+        caveats=["仅使用 synthetic data，不代表真实业务结论。"],
     )
-    assert review_analysis(trace).status == "PASS"
+    review = review_analysis(trace)
+    assert review.status == "PASS"
+    assert review.score >= 80
+    assert review.checks["has_route_taken"]
 
 
 def test_reviewer_returns_fail_for_missing_core_fields() -> None:
@@ -38,6 +43,7 @@ def test_reviewer_missing_goal_mode_is_warn_only_when_findings_exist() -> None:
         selected_metrics=["orders"],
         analysis_plan={"intent": "metric_drop_diagnosis"},
         executed_queries=["pandas: summary"],
+        route_taken=["resolve_metrics", "create_plan", "route_metric_diagnosis"],
         generated_findings=["限制说明：synthetic data only，保留不确定性。"],
     )
     review = review_analysis(trace)

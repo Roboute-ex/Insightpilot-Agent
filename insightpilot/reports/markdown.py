@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 
 def _format_metric(metric: object) -> str:
     if isinstance(metric, dict):
@@ -9,72 +11,125 @@ def _format_metric(metric: object) -> str:
     return f"- {metric}"
 
 
+def _as_list(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if value:
+        return [value]
+    return []
+
+
+def _bullet_lines(items: Any, fallback: str = "- 暂无") -> str:
+    values = _as_list(items)
+    return "\n".join(f"- {item}" for item in values) if values else fallback
+
+
+def _source_label(goal_mode_source: str) -> str:
+    if goal_mode_source == "user_selected":
+        return "用户选择"
+    if goal_mode_source == "auto_detected":
+        return "自动识别"
+    return goal_mode_source or "自动识别"
+
+
 def generate_markdown_report(result: dict[str, object]) -> str:
-    """Generate a compact markdown report from a workflow result."""
+    """Generate a structured v0.2 markdown report from a workflow result."""
 
     question = str(result.get("question", ""))
     plan = result.get("plan", {})
     plan_dict = plan if isinstance(plan, dict) else {}
+    trace = result.get("trace", {})
+    trace_dict = trace if isinstance(trace, dict) else {}
+    reviewer = result.get("reviewer", {})
+    reviewer_dict = reviewer if isinstance(reviewer, dict) else {}
+
     goal_mode = str(result.get("goal_mode") or plan_dict.get("goal_mode") or "auto")
     goal_mode_display_name = str(
         result.get("goal_mode_display_name") or plan_dict.get("goal_mode_display_name") or "自动识别"
     )
     goal_mode_source = str(result.get("goal_mode_source") or plan_dict.get("goal_mode_source") or "auto_detected")
+    workflow_backend = str(result.get("workflow_backend") or trace_dict.get("workflow_backend") or "rule_based")
+    route_taken = _as_list(result.get("route_taken") or trace_dict.get("route_taken") or [])
     metrics = result.get("metrics", [])
     findings = result.get("findings", [])
-    reviewer = result.get("reviewer", {})
-    reviewer_dict = reviewer if isinstance(reviewer, dict) else {}
-    limitations = result.get("limitations", [])
+    caveats = result.get("caveats") or result.get("limitations") or []
     next_steps = result.get("next_steps", [])
 
-    metric_lines = "\n".join(_format_metric(metric) for metric in metrics) or "- 未识别到明确指标"
-    step_lines = "\n".join(f"- {step}" for step in plan_dict.get("analysis_steps", [])) or "- 暂无"
-    finding_lines = "\n".join(f"- {finding}" for finding in findings) or "- 暂无"
-    limitation_lines = "\n".join(f"- {item}" for item in limitations) or "- synthetic data only"
-    next_step_lines = "\n".join(f"- {item}" for item in next_steps) or "- 继续补充更细粒度的 synthetic 场景。"
+    metric_lines = "\n".join(_format_metric(metric) for metric in _as_list(metrics)) or "- 未识别到明确指标"
+    step_lines = _bullet_lines(plan_dict.get("analysis_steps", []))
+    finding_lines = _bullet_lines(findings)
+    caveat_lines = _bullet_lines(caveats, "- synthetic data only")
+    next_step_lines = _bullet_lines(next_steps, "- 继续补充更细粒度的 synthetic 场景。")
+    route_lines = _bullet_lines(route_taken)
 
-    issues = reviewer_dict.get("issues") or []
-    suggestions = reviewer_dict.get("suggestions") or []
-    reviewer_lines = [f"- 状态：{reviewer_dict.get('status', 'UNKNOWN')}"]
-    reviewer_lines.extend(f"- 问题：{issue}" for issue in issues)
-    reviewer_lines.extend(f"- 建议：{suggestion}" for suggestion in suggestions)
-    source_label = "用户选择" if goal_mode_source == "user_selected" else "自动识别"
-    goal_mode_lines = "\n".join(
-        [
-            f"- 分析目标模式：{goal_mode_display_name}（{goal_mode}）",
-            f"- 来源：{source_label}",
-        ]
-    )
+    issues = _as_list(reviewer_dict.get("issues"))
+    suggestions = _as_list(reviewer_dict.get("suggestions"))
+    checks = reviewer_dict.get("checks", {})
+    checks_dict = checks if isinstance(checks, dict) else {}
+    reviewer_lines = [
+        f"- status: {reviewer_dict.get('status', 'UNKNOWN')}",
+        f"- score: {reviewer_dict.get('score', 'N/A')}",
+    ]
+    reviewer_lines.extend(f"- issue: {issue}" for issue in issues)
+    reviewer_lines.extend(f"- suggestion: {suggestion}" for suggestion in suggestions)
+    if checks_dict:
+        reviewer_lines.append("- Reviewer 检查：")
+        reviewer_lines.extend(f"- {name}: {passed}" for name, passed in checks_dict.items())
+
+    trace_summary_lines = [
+        f"- trace_id: {trace_dict.get('trace_id', 'N/A')}",
+        f"- created_at: {trace_dict.get('created_at', 'N/A')}",
+        f"- workflow_backend: {trace_dict.get('workflow_backend', workflow_backend)}",
+        f"- route_taken_count: {len(route_taken)}",
+        f"- errors_count: {len(_as_list(trace_dict.get('errors', [])))}",
+    ]
+
+    source_label = _source_label(goal_mode_source)
+    plan_lines = [
+        f"- 识别出的分析意图：{plan_dict.get('intent', result.get('intent', 'unknown'))}",
+        f"- comparison_method: {plan_dict.get('comparison_method', 'unknown')}",
+        f"- required_tables: {', '.join(_as_list(plan_dict.get('required_tables', []))) or 'N/A'}",
+        "- 分析步骤：",
+        step_lines,
+    ]
 
     return "\n".join(
         [
-            "# InsightPilot Agent 分析报告",
+            "# InsightPilot Agent Analysis Report",
             "",
-            "## 用户问题",
+            "## 1. 用户问题",
             question,
             "",
-            "## 分析目标模式",
-            goal_mode_lines,
+            "## 2. 分析目标模式",
+            f"- 分析目标模式：{goal_mode_display_name} ({goal_mode})",
+            f"- 来源：{source_label}",
             "",
-            "## 识别出的分析意图",
-            str(plan_dict.get("intent", result.get("intent", "unknown"))),
+            "## 3. Workflow Backend",
+            f"- workflow_backend: {workflow_backend}",
             "",
-            "## 涉及指标",
+            "## 4. Route Taken",
+            route_lines,
+            "",
+            "## 5. 识别指标",
+            "涉及指标：",
             metric_lines,
             "",
-            "## 分析步骤",
-            step_lines,
+            "## 6. 分析计划",
+            "\n".join(plan_lines),
             "",
-            "## 核心发现",
+            "## 7. 核心发现",
             finding_lines,
             "",
-            "## Reviewer 检查",
+            "## 8. Reviewer 结果",
             "\n".join(reviewer_lines),
             "",
-            "## 限制说明",
-            limitation_lines,
+            "## 9. Trace 摘要",
+            "\n".join(trace_summary_lines),
             "",
-            "## 下一步建议",
+            "## 10. 限制说明",
+            caveat_lines,
+            "",
+            "## 11. 下一步建议",
             next_step_lines,
             "",
         ]

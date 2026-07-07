@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "insightpilot-agent"
-version = "0.1.0"
-description = "Synthetic-data-only analytics automation workbench, consolidated v0.1 baseline with deterministic planning."
+version = "0.2.0"
+description = "Synthetic-data-only analytics automation workbench with deterministic workflow, trace, reviewer, and optional LangGraph fallback."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

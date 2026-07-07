@@ -38,6 +38,11 @@ def parse_args() -> argparse.Namespace:
         default="auto",
         help="Analysis goal mode. Defaults to auto.",
     )
+    parser.add_argument(
+        "--use-langgraph",
+        action="store_true",
+        help="Use optional LangGraph workflow when installed; otherwise fall back automatically.",
+    )
     return parser.parse_args()
 
 
@@ -48,13 +53,16 @@ def main() -> None:
     report_dir = PROJECT_ROOT / "reports"
     for scenario in scenarios:
         question = SCENARIO_QUESTIONS[scenario]
-        result = run_agent_analysis(question, tables, goal_mode=args.goal_mode)
+        result = run_agent_analysis(question, tables, goal_mode=args.goal_mode, use_langgraph=args.use_langgraph)
         report_path = write_text_report(report_dir / f"{scenario}_report.md", result["report_markdown"])
+        reviewer = result["reviewer"]
         print(
-            f"[{scenario}] intent={result['intent']} goal_mode={result['goal_mode']} "
-            f"source={result['goal_mode_source']} reviewer={result['reviewer']['status']}"
+            f"scenario={scenario} intent={result['intent']} goal_mode={result['goal_mode']} "
+            f"goal_mode_source={result['goal_mode_source']} workflow_backend={result['workflow_backend']} "
+            f"reviewer_status={reviewer['status']} reviewer_score={reviewer['score']}"
         )
         print(f"report: {report_path}")
+        print(f"route_taken: {', '.join(result['route_taken'])}")
         for finding in result["findings"][:3]:
             print(f"- {finding}")
 
