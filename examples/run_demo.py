@@ -47,6 +47,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--database-url", help="SQLAlchemy database URL for database ingestion.")
     parser.add_argument("--query", help="Read-only SELECT/WITH SQL query for database ingestion.")
     parser.add_argument("--question", help="Natural-language analysis question for custom data.")
+    parser.add_argument("--date-column", help="Date column for custom data mapping.")
+    parser.add_argument("--metric-columns", help="Comma-separated metric columns for custom data mapping.")
+    parser.add_argument("--dimension-columns", help="Comma-separated dimension columns for custom data mapping.")
+    parser.add_argument("--group-column", help="Group column for experiment analysis.")
+    parser.add_argument("--treatment-column", help="Treatment column for causal exploration.")
+    parser.add_argument("--outcome-column", help="Outcome column for causal exploration.")
+    parser.add_argument(
+        "--time-grain",
+        choices=["day", "week", "month"],
+        default="day",
+        help="Time grain for custom trend analysis.",
+    )
     parser.add_argument(
         "--goal-mode",
         choices=list(GOAL_MODE_DISPLAY_NAMES.keys()),
@@ -65,6 +77,28 @@ def _sheet_name(value: str | None) -> str | int | None:
     if value is None:
         return None
     return int(value) if value.isdigit() else value
+
+
+def _split_columns(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [column.strip() for column in value.split(",") if column.strip()]
+
+
+def _column_mapping_from_args(args: argparse.Namespace) -> dict[str, object] | None:
+    mapping = {
+        "table_name": args.table_name,
+        "date_column": args.date_column,
+        "metric_columns": _split_columns(args.metric_columns),
+        "dimension_columns": _split_columns(args.dimension_columns),
+        "group_column": args.group_column,
+        "treatment_column": args.treatment_column,
+        "outcome_column": args.outcome_column,
+        "time_grain": args.time_grain,
+    }
+    if not any(value for key, value in mapping.items() if key != "time_grain"):
+        return None
+    return mapping
 
 
 def _load_file_tables(args: argparse.Namespace) -> tuple[dict[str, object], dict[str, dict[str, object]], str]:
@@ -101,6 +135,7 @@ def _load_database_tables(args: argparse.Namespace) -> tuple[dict[str, object], 
 def main() -> None:
     args = parse_args()
     report_dir = PROJECT_ROOT / "reports"
+    column_mapping = _column_mapping_from_args(args)
     if args.data_source == "file":
         tables, table_metadata, question = _load_file_tables(args)
         scenarios = ["file"]
@@ -124,6 +159,7 @@ def main() -> None:
             use_langgraph=args.use_langgraph,
             data_source_type=data_source_type,
             table_metadata=table_metadata,
+            column_mapping=column_mapping,
         )
         report_path = write_text_report(report_dir / f"{scenario}_report.md", result["report_markdown"])
         reviewer = result["reviewer"]

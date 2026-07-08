@@ -43,6 +43,31 @@ def _table_metadata_lines(metadata: Any) -> str:
     return "\n".join(lines) if lines else "- 暂无表结构摘要"
 
 
+def _column_mapping_lines(mapping: Any, mapping_source: str, mapping_warnings: Any) -> str:
+    if not isinstance(mapping, dict) or not mapping:
+        return "\n".join(
+            [
+                f"- mapping_source: {mapping_source or 'none'}",
+                "- 当前未提供手动字段映射，系统使用自动推断或通用分析 fallback。",
+                _bullet_lines(mapping_warnings, "- mapping_warnings: 暂无"),
+            ]
+        )
+    lines = [
+        f"- mapping_source: {mapping_source or 'none'}",
+        f"- table_name: {mapping.get('table_name')}",
+        f"- date_column: {mapping.get('date_column')}",
+        f"- metric_columns: {', '.join(_as_list(mapping.get('metric_columns')))}",
+        f"- dimension_columns: {', '.join(_as_list(mapping.get('dimension_columns')))}",
+        f"- group_column: {mapping.get('group_column')}",
+        f"- treatment_column: {mapping.get('treatment_column')}",
+        f"- outcome_column: {mapping.get('outcome_column')}",
+        f"- time_grain: {mapping.get('time_grain', 'day')}",
+        "- mapping_warnings:",
+        _bullet_lines(mapping_warnings),
+    ]
+    return "\n".join(lines)
+
+
 def _source_label(goal_mode_source: str) -> str:
     if goal_mode_source == "user_selected":
         return "用户选择"
@@ -76,6 +101,9 @@ def generate_markdown_report(result: dict[str, object]) -> str:
     data_source_type = str(result.get("data_source_type") or trace_dict.get("data_source_type") or "synthetic")
     table_metadata = result.get("table_metadata") or trace_dict.get("table_metadata_summary") or {}
     schema_warnings = result.get("schema_warnings") or trace_dict.get("schema_warnings") or []
+    column_mapping = result.get("column_mapping") or trace_dict.get("column_mapping") or {}
+    mapping_warnings = result.get("mapping_warnings") or trace_dict.get("mapping_warnings") or []
+    mapping_source = str(result.get("mapping_source") or trace_dict.get("mapping_source") or "none")
 
     metric_lines = "\n".join(_format_metric(metric) for metric in _as_list(metrics)) or "- 未识别到明确指标"
     step_lines = _bullet_lines(plan_dict.get("analysis_steps", []))
@@ -105,6 +133,7 @@ def generate_markdown_report(result: dict[str, object]) -> str:
         f"- route_taken_count: {len(route_taken)}",
         f"- errors_count: {len(_as_list(trace_dict.get('errors', [])))}",
         f"- data_source_type: {data_source_type}",
+        f"- mapping_source: {mapping_source}",
     ]
 
     source_label = _source_label(goal_mode_source)
@@ -142,26 +171,29 @@ def generate_markdown_report(result: dict[str, object]) -> str:
             "## 7. Schema Warnings",
             _bullet_lines(schema_warnings),
             "",
-            "## 8. 识别指标",
+            "## 8. Column Mapping",
+            _column_mapping_lines(column_mapping, mapping_source, mapping_warnings),
+            "",
+            "## 9. 识别指标",
             "涉及指标：",
             metric_lines,
             "",
-            "## 9. 分析计划",
+            "## 10. 分析计划",
             "\n".join(plan_lines),
             "",
-            "## 10. 核心发现",
+            "## 11. 核心发现",
             finding_lines,
             "",
-            "## 11. Reviewer 结果",
+            "## 12. Reviewer 结果",
             "\n".join(reviewer_lines),
             "",
-            "## 12. Trace 摘要",
+            "## 13. Trace 摘要",
             "\n".join(trace_summary_lines),
             "",
-            "## 13. 限制说明",
+            "## 14. 限制说明",
             caveat_lines,
             "",
-            "## 14. 下一步建议",
+            "## 15. 下一步建议",
             next_step_lines,
             "",
         ]

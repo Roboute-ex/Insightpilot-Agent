@@ -38,6 +38,20 @@ v0.3 支持三类数据来源：
 
 规则是启发式的，主要基于字段名、dtype、unique count 和 id-like 字段排除。
 
+## Metric / Column Mapping
+
+v0.4 在 schema mapping 之后增加 ColumnMapping。用户可以在 Streamlit 或 CLI 中手动选择：
+
+- date_column
+- metric_columns
+- dimension_columns
+- group_column
+- treatment_column
+- outcome_column
+- time_grain
+
+手动 mapping 优先于自动推断。mapping 会写入 trace、reviewer 和 report。若 mapping 不完整，workflow 会保留 warnings 并进入 generic fallback。
+
 ## Validation
 
 `validate_dataframe_for_analysis()` 会检查：
@@ -78,6 +92,8 @@ metadata 不包含完整 DataFrame，避免 trace/report 误序列化数据。
 - experiment_analysis：需要 control/treatment 分组和数值 outcome，否则输出说明。
 - causal_exploration：需要 treatment/outcome 和控制变量，否则只输出 caveat。
 - live_quality / content_performance：缺少相关字段时退化为 schema profile。
+
+如果用户提供 ColumnMapping，fallback 会优先使用用户选择的字段，而不是完全依赖字段名和 dtype。
 
 ## Safety Limitations
 

@@ -15,6 +15,12 @@ from insightpilot.agents.reviewer import review_analysis
 from insightpilot.agents.state import WorkflowState, create_initial_state
 from insightpilot.agents.trace import AnalysisTrace
 from insightpilot.config import REPORT_LIMITATION
+from insightpilot.ingestion.mapping import (
+    ColumnMapping,
+    normalize_column_mapping,
+    suggest_column_mapping,
+    validate_column_mapping,
+)
 from insightpilot.ingestion.schema_mapper import infer_schema_mapping
 from insightpilot.ingestion.validation import validate_tables_for_workflow
 from insightpilot.metrics.dictionary import MetricDefinition
@@ -142,6 +148,86 @@ def _mapping_for_table(state: WorkflowState, table_name: str, df: pd.DataFrame) 
     if isinstance(mapping, dict) and mapping:
         return mapping
     return infer_schema_mapping(table_name, df).to_dict()
+
+
+def _column_mapping_from_state(state: WorkflowState) -> ColumnMapping:
+    if not isinstance(state.column_mapping, dict) or not state.column_mapping:
+        return ColumnMapping()
+    return ColumnMapping(
+        table_name=state.column_mapping.get("table_name"),
+        date_column=state.column_mapping.get("date_column"),
+        metric_columns=list(state.column_mapping.get("metric_columns", [])),
+        dimension_columns=list(state.column_mapping.get("dimension_columns", [])),
+        group_column=state.column_mapping.get("group_column"),
+        treatment_column=state.column_mapping.get("treatment_column"),
+        outcome_column=state.column_mapping.get("outcome_column"),
+        time_grain=state.column_mapping.get("time_grain", "day"),
+        notes=list(state.column_mapping.get("notes", [])),
+    )
+
+
+def _select_mapping_table(
+    state: WorkflowState,
+    tables: dict[str, pd.DataFrame],
+    requested_table: str | None = None,
+) -> tuple[str, pd.DataFrame] | None:
+    if not tables:
+        return None
+    if requested_table and requested_table in tables:
+        return requested_table, tables[requested_table]
+    current_table = state.column_mapping.get("table_name") if isinstance(state.column_mapping, dict) else None
+    if current_table and current_table in tables:
+        return str(current_table), tables[str(current_table)]
+    return _first_custom_table(state, tables)
+
+
+def _prepare_column_mapping_node(
+    state: WorkflowState,
+    tables: dict[str, pd.DataFrame],
+    engine: AnalyticsEngine | None = None,
+) -> WorkflowState:
+    if not state.user_table_mode:
+        state.column_mapping = {}
+        state.mapping_source = "none"
+        state.mapping_warnings = []
+        return state
+
+    raw_mapping = state.column_mapping if isinstance(state.column_mapping, dict) and state.column_mapping else None
+    requested_table = raw_mapping.get("table_name") if raw_mapping else None
+    selected = _select_mapping_table(state, tables, str(requested_table) if requested_table else None)
+    if selected is None:
+        state.mapping_source = "none"
+        state.mapping_warnings = ["没有可用表，无法生成字段映射。"]
+        return state
+
+    table_name, df = selected
+    available_columns = [str(column) for column in df.columns]
+    if raw_mapping:
+        state.mapping_source = "user_selected"
+        mapping = normalize_column_mapping(raw_mapping, available_columns)
+        mapping.table_name = table_name
+    else:
+        state.add_route("suggest_column_mapping")
+        state.mapping_source = "auto_suggested"
+        mapping = suggest_column_mapping(table_name, df)
+
+    state.add_route("validate_column_mapping")
+    warnings = validate_column_mapping(mapping, available_columns)
+    for note in mapping.notes:
+        if note not in warnings:
+            warnings.append(note)
+    for metric_column in mapping.metric_columns:
+        if metric_column in df.columns and not pd.api.types.is_numeric_dtype(df[metric_column]):
+            warnings.append(f"metric_columns 包含非数值列，将在分析时尝试转换：{metric_column}")
+    if mapping.outcome_column and mapping.outcome_column in df.columns and not pd.api.types.is_numeric_dtype(df[mapping.outcome_column]):
+        warnings.append(f"outcome_column 不是数值列，将在因果探索时尝试转换：{mapping.outcome_column}")
+
+    state.add_route("apply_column_mapping")
+    state.column_mapping = mapping.to_dict()
+    state.mapping_warnings = list(dict.fromkeys(warnings))
+    if state.mapping_warnings:
+        _append_unique(state.caveats, state.mapping_warnings)
+    return state
 
 
 def _record_query(
@@ -699,11 +785,15 @@ def _profile_custom_tables(state: WorkflowState, tables: dict[str, pd.DataFrame]
     return profiles
 
 
-def _custom_date_metric_frame(df: pd.DataFrame, date_col: str, metric_col: str) -> pd.DataFrame:
+def _custom_date_metric_frame(df: pd.DataFrame, date_col: str, metric_col: str, time_grain: str = "day") -> pd.DataFrame:
     working = df[[date_col, metric_col]].copy()
     working[date_col] = pd.to_datetime(working[date_col], errors="coerce")
     working[metric_col] = pd.to_numeric(working[metric_col], errors="coerce")
     working = working.dropna(subset=[date_col, metric_col])
+    if time_grain == "week":
+        working[date_col] = working[date_col].dt.to_period("W").dt.start_time
+    elif time_grain == "month":
+        working[date_col] = working[date_col].dt.to_period("M").dt.to_timestamp()
     return working.groupby(date_col, as_index=False)[metric_col].sum().sort_values(date_col)
 
 
@@ -729,7 +819,8 @@ def _run_generic_analysis_node(
 ) -> WorkflowState:
     state.add_route("generic_analysis_fallback")
     profiles = _profile_custom_tables(state, tables)
-    selected = _first_custom_table(state, tables)
+    applied_mapping = _column_mapping_from_state(state)
+    selected = _select_mapping_table(state, tables, applied_mapping.table_name)
     if selected is None:
         state.errors.append("No tables available for custom data workflow.")
         _set_node_outputs(
@@ -743,13 +834,18 @@ def _run_generic_analysis_node(
         return state
 
     table_name, df = selected
-    mapping = _mapping_for_table(state, table_name, df)
-    date_columns = list(mapping.get("detected_date_columns", []))
-    metric_columns = list(mapping.get("possible_metric_columns") or mapping.get("detected_numeric_columns", []))
-    dimension_columns = list(mapping.get("possible_dimension_columns") or mapping.get("detected_categorical_columns", []))
+    schema_mapping = _mapping_for_table(state, table_name, df)
+    date_columns = [applied_mapping.date_column] if applied_mapping.date_column else list(schema_mapping.get("detected_date_columns", []))
+    metric_columns = applied_mapping.metric_columns or list(
+        schema_mapping.get("possible_metric_columns") or schema_mapping.get("detected_numeric_columns", [])
+    )
+    dimension_columns = applied_mapping.dimension_columns or list(
+        schema_mapping.get("possible_dimension_columns") or schema_mapping.get("detected_categorical_columns", [])
+    )
     route = _route_from_plan(state)
     findings: list[str] = [
         f"数据来源为 {state.data_source_type}，当前使用表 {table_name}（{len(df)} 行，{len(df.columns)} 列）进行通用分析。",
+        f"字段映射来源为 {state.mapping_source}，优先使用已应用的 Column Mapping。",
     ]
     next_steps = [
         "如需更稳定的诊断，请明确日期列、指标列和优先维度字段。",
@@ -763,7 +859,7 @@ def _run_generic_analysis_node(
             date_col = date_columns[0]
             metric_col = metric_columns[0]
             state.add_route("run_generic_trend")
-            metric_frame = _custom_date_metric_frame(df, date_col, metric_col)
+            metric_frame = _custom_date_metric_frame(df, date_col, metric_col, applied_mapping.time_grain)
             artifacts["generic_trend"] = _round_value(metric_frame.tail(20).to_dict(orient="records"))
             if len(metric_frame) >= 8:
                 state.add_route("run_generic_anomaly")
@@ -777,28 +873,102 @@ def _run_generic_analysis_node(
                 caveats.append("日期样本不足，异常检测退化为趋势摘要。")
             if dimension_columns:
                 findings.append(f"可作为后续拆解的候选维度包括：{', '.join(dimension_columns[:5])}。")
+                if route == "metric_diagnosis":
+                    state.add_route("run_generic_dimension_breakdown")
+                    breakdowns: dict[str, Any] = {}
+                    for dimension in dimension_columns[:3]:
+                        try:
+                            contribution = dimension_contribution(df, metric_col, dimension, date_col=date_col)
+                            breakdowns[dimension] = contribution.head(5).to_dict(orient="records")
+                        except Exception as exc:
+                            state.mapping_warnings.append(f"维度 {dimension} 拆解失败：{exc}")
+                    if breakdowns:
+                        artifacts["generic_dimension_breakdown"] = _round_value(breakdowns)
         else:
-            findings.append("未同时识别到日期列和数值指标列，已退化为表结构 profile 摘要。")
-            caveats.append("需要指定日期列和数值指标列后才能执行通用趋势或异常检测。")
+            if metric_columns:
+                state.add_route("run_generic_metric_summary")
+                summary: dict[str, Any] = {}
+                for metric_col in metric_columns[:5]:
+                    numeric = pd.to_numeric(df[metric_col], errors="coerce").dropna()
+                    if not numeric.empty:
+                        summary[metric_col] = {
+                            "count": int(numeric.count()),
+                            "mean": float(numeric.mean()),
+                            "min": float(numeric.min()),
+                            "max": float(numeric.max()),
+                        }
+                artifacts["generic_metric_summary"] = _round_value(summary)
+                findings.append("未选择日期列，已根据 metric_columns 输出指标摘要。")
+                caveats.append("缺少 date_column，无法执行时间趋势或异常检测。")
+            else:
+                findings.append("未同时识别到日期列和数值指标列，已退化为表结构 profile 摘要。")
+                caveats.append("需要指定日期列和数值指标列后才能执行通用趋势或异常检测。")
     elif route == "experiment_analysis":
-        group_col, metric_col = _find_experiment_columns(df)
+        group_col = applied_mapping.group_column
+        metric_col = next(iter(applied_mapping.metric_columns), None)
+        if not (group_col and metric_col):
+            group_col, metric_col = _find_experiment_columns(df)
         if group_col and metric_col:
             state.add_route("run_generic_experiment")
-            ab_result = analyze_ab_test(df, group_col, metric_col, metric_type="mean")
-            artifacts["generic_ab_test"] = _round_value(ab_result)
-            findings.extend(
-                [
-                    f"识别到实验分组字段 {group_col} 和指标字段 {metric_col}。",
-                    f"p_value={float(ab_result['p_value']):.6f}，sample_size={ab_result['sample_size']}。",
-                    str(ab_result["conclusion"]),
-                ]
-            )
+            values = set(df[group_col].dropna().astype(str).str.lower().unique())
+            if {"control", "treatment"}.issubset(values):
+                ab_result = analyze_ab_test(df, group_col, metric_col, metric_type="mean")
+                artifacts["generic_ab_test"] = _round_value(ab_result)
+                findings.extend(
+                    [
+                        f"识别到实验分组字段 {group_col} 和指标字段 {metric_col}。",
+                        f"p_value={float(ab_result['p_value']):.6f}，sample_size={ab_result['sample_size']}。",
+                        str(ab_result["conclusion"]),
+                    ]
+                )
+            else:
+                group_summary = (
+                    df[[group_col, metric_col]]
+                    .assign(**{metric_col: pd.to_numeric(df[metric_col], errors="coerce")})
+                    .dropna(subset=[group_col, metric_col])
+                    .groupby(group_col)[metric_col]
+                    .agg(["count", "mean"])
+                    .reset_index()
+                )
+                artifacts["generic_group_mean_comparison"] = _round_value(group_summary.to_dict(orient="records"))
+                findings.append(f"使用 group_column={group_col} 和 metric={metric_col} 输出组间均值比较。")
+                caveats.append("group_column 未同时包含 control/treatment，未执行 A/B 显著性检验。")
         else:
             findings.append("未识别到包含 control/treatment 的分组字段和数值指标，无法执行通用实验评估。")
             caveats.append("实验分析需要明确 group 字段且包含 control/treatment，以及一个数值 outcome 字段。")
     elif route == "causal_exploration":
-        findings.append("自定义数据的轻量因果探索需要明确 treatment、outcome 和控制变量，当前仅输出 schema profile。")
-        caveats.append("未指定 treatment/outcome 字段时，不执行轻量因果估计，避免误读相关性。")
+        if applied_mapping.treatment_column and applied_mapping.outcome_column:
+            state.add_route("run_generic_causal_light")
+            covariates = [
+                column
+                for column in dimension_columns[:5]
+                if column not in {applied_mapping.treatment_column, applied_mapping.outcome_column}
+            ]
+            if covariates:
+                try:
+                    effect = estimate_adjusted_effect(
+                        df,
+                        applied_mapping.treatment_column,
+                        applied_mapping.outcome_column,
+                        covariates,
+                    )
+                    artifacts["generic_causal_light"] = _round_value(effect)
+                    findings.append(
+                        f"使用 treatment={applied_mapping.treatment_column} 和 outcome={applied_mapping.outcome_column} 完成轻量因果探索。"
+                    )
+                    findings.append(
+                        f"adjusted_effect={float(effect['adjusted_effect']):.4f}，sample_size={effect['sample_size']}。"
+                    )
+                    caveats.extend(str(item) for item in effect.get("caveats", []))
+                except Exception as exc:
+                    findings.append("已识别 treatment/outcome，但轻量因果估计执行失败，已退化为 schema profile。")
+                    caveats.append(f"轻量因果估计失败：{exc}")
+            else:
+                findings.append("已识别 treatment/outcome，但缺少控制变量，暂不执行轻量因果估计。")
+                caveats.append("causal_exploration 建议至少选择一个维度或控制变量字段。")
+        else:
+            findings.append("自定义数据的轻量因果探索需要明确 treatment、outcome 和控制变量，当前仅输出 schema profile。")
+            caveats.append("未指定 treatment/outcome 字段时，不执行轻量因果估计，避免误读相关性。")
     else:
         findings.append("当前目标模式缺少标准 demo 字段，已转为通用表结构和字段候选摘要。")
         if metric_columns:
@@ -856,6 +1026,9 @@ def _build_trace_from_state(state: WorkflowState) -> AnalysisTrace:
         data_source_type=state.data_source_type,
         table_metadata_summary=_summarize_table_metadata(state.table_metadata),
         schema_warnings=state.schema_warnings,
+        column_mapping=state.column_mapping,
+        mapping_warnings=state.mapping_warnings,
+        mapping_source=state.mapping_source,
         identified_intent=state.intent,
         selected_metrics=state.selected_metrics,
         analysis_plan=state.analysis_plan,
@@ -897,6 +1070,9 @@ def _build_result_from_state(state: WorkflowState) -> dict[str, Any]:
         "table_metadata": _summarize_table_metadata(state.table_metadata),
         "schema_warnings": state.schema_warnings,
         "user_table_mode": state.user_table_mode,
+        "column_mapping": state.column_mapping,
+        "mapping_warnings": state.mapping_warnings,
+        "mapping_source": state.mapping_source,
     }
 
 
@@ -929,8 +1105,16 @@ def _run_rule_based_workflow(
     initial_errors: list[str] | None = None,
     data_source_type: str = "synthetic",
     table_metadata: dict[str, Any] | None = None,
+    column_mapping: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    state = create_initial_state(question, tables, goal_mode, data_source_type=data_source_type, table_metadata=table_metadata)
+    state = create_initial_state(
+        question,
+        tables,
+        goal_mode,
+        data_source_type=data_source_type,
+        table_metadata=table_metadata,
+        column_mapping=column_mapping,
+    )
     state.intermediate_results["workflow_backend"] = workflow_backend
     if initial_caveats:
         _append_unique(state.caveats, initial_caveats)
@@ -938,6 +1122,7 @@ def _run_rule_based_workflow(
         _append_unique(state.errors, initial_errors)
     engine = _safe_engine(tables)
     _load_data_source_node(state, tables, engine)
+    _prepare_column_mapping_node(state, tables, engine)
     _resolve_metrics_node(state, tables, engine)
     _create_plan_node(state, tables, engine)
     _run_routed_analysis(state, tables, engine)
@@ -957,6 +1142,7 @@ def run_agent_analysis(
     use_langgraph: bool = False,
     data_source_type: str = "synthetic",
     table_metadata: dict[str, Any] | None = None,
+    column_mapping: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run the deterministic workflow over synthetic tables."""
 
@@ -971,6 +1157,7 @@ def run_agent_analysis(
                     goal_mode=goal_mode,
                     data_source_type=data_source_type,
                     table_metadata=table_metadata,
+                    column_mapping=column_mapping,
                 )
             except Exception as exc:
                 return _run_rule_based_workflow(
@@ -982,6 +1169,7 @@ def run_agent_analysis(
                     initial_errors=[f"LangGraph workflow fallback: {exc}"],
                     data_source_type=data_source_type,
                     table_metadata=table_metadata,
+                    column_mapping=column_mapping,
                 )
         return _run_rule_based_workflow(
             question,
@@ -991,6 +1179,7 @@ def run_agent_analysis(
             initial_caveats=["Optional LangGraph 未安装，已自动回退到 rule-based workflow。"],
             data_source_type=data_source_type,
             table_metadata=table_metadata,
+            column_mapping=column_mapping,
         )
 
     return _run_rule_based_workflow(
@@ -1000,6 +1189,7 @@ def run_agent_analysis(
         workflow_backend=WORKFLOW_BACKEND_RULE_BASED,
         data_source_type=data_source_type,
         table_metadata=table_metadata,
+        column_mapping=column_mapping,
     )
 
 

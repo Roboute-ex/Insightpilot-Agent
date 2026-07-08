@@ -35,6 +35,9 @@ def _combined_text(trace: AnalysisTrace) -> str:
         str(trace.analysis_plan),
         str(trace.table_metadata_summary),
         " ".join(trace.schema_warnings),
+        str(trace.column_mapping),
+        " ".join(trace.mapping_warnings),
+        trace.mapping_source,
         str(trace.reviewer_checks),
         " ".join(trace.errors),
     ]
@@ -73,7 +76,18 @@ def review_analysis(trace: AnalysisTrace) -> ReviewerResult:
             term in text for term in ("自定义数据", "上传", "database", "数据库", "schema", "字段", "仅基于当前表")
         ),
         "unsafe_query_blocked": True,
+        "has_column_mapping_for_custom_data": trace.data_source_type == "synthetic" or bool(trace.column_mapping),
+        "mapping_warnings_reported": True,
+        "manual_mapping_respected": trace.mapping_source != "user_selected" or bool(trace.column_mapping),
+        "custom_data_has_metric_selection": trace.data_source_type == "synthetic"
+        or trace.goal_mode not in {"metric_diagnosis", "growth_trend", "experiment_analysis"}
+        or bool(trace.column_mapping.get("metric_columns")),
+        "custom_data_has_date_selection_when_trend": trace.data_source_type == "synthetic"
+        or trace.goal_mode not in {"metric_diagnosis", "growth_trend"}
+        or bool(trace.column_mapping.get("date_column")),
     }
+    if trace.mapping_warnings and "mapping" not in text and "字段" not in text:
+        checks["mapping_warnings_reported"] = False
 
     is_experiment = trace.goal_mode == "experiment_analysis" or trace.identified_intent == "experiment_analysis"
     if is_experiment:
@@ -123,6 +137,23 @@ def review_analysis(trace: AnalysisTrace) -> ReviewerResult:
             "说明当前结果仅基于用户提供表结构，必要时需要指定日期、指标或维度字段。",
         ),
         "unsafe_query_blocked": ("SQL 安全检查上下文缺失。", "数据库模式下保留只读 SQL 安全边界说明。"),
+        "has_column_mapping_for_custom_data": (
+            "自定义数据缺少 Column Mapping。",
+            "请选择日期列、至少一个指标列，或保留自动字段映射建议。",
+        ),
+        "mapping_warnings_reported": (
+            "字段映射 warning 未进入 trace/report 上下文。",
+            "把 mapping_warnings 写入 reviewer、trace 和 report。",
+        ),
+        "manual_mapping_respected": ("手动字段映射未被保留。", "用户选择的 Column Mapping 必须优先于自动推断。"),
+        "custom_data_has_metric_selection": (
+            "自定义数据缺少指标列选择。",
+            "请选择至少一个数值指标列，或补充字段映射。",
+        ),
+        "custom_data_has_date_selection_when_trend": (
+            "趋势/诊断模式缺少日期列选择。",
+            "请选择日期列和至少一个指标列以启用趋势或异常检测。",
+        ),
     }
 
     for check_name, passed in checks.items():
@@ -160,6 +191,11 @@ def review_analysis(trace: AnalysisTrace) -> ReviewerResult:
         "has_schema_validation": 10,
         "custom_data_limitations_reported": 12,
         "unsafe_query_blocked": 20,
+        "has_column_mapping_for_custom_data": 12,
+        "mapping_warnings_reported": 8,
+        "manual_mapping_respected": 20,
+        "custom_data_has_metric_selection": 15,
+        "custom_data_has_date_selection_when_trend": 10,
     }
     for check_name, passed in checks.items():
         if not passed:

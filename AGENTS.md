@@ -21,10 +21,19 @@ InsightPilot Agent 是 synthetic-data-first 的本地分析自动化工作台，
 
 ## 版本语义规则
 
-- 当前 `0.3.0` 表示 Data Ingestion and External Data Connectors。
+- 当前 `0.4.0` 表示 Usability, Metric Mapping UI and Documentation Polish。
 - v0.1 是基础分析能力合并版。
 - v0.2 聚焦 WorkflowState、route_taken、AnalysisTrace、ReviewerResult、workflow_backend 和 optional LangGraph fallback。
 - v0.3 聚焦 CSV / Excel upload、database query ingestion、schema mapping、validation 和 custom data fallback。
+- v0.4 聚焦 ColumnMapping、Metric Mapping UI、custom data usability、documentation polish 和 format normalization。
+
+## 文本文件格式规则
+
+- README、AGENTS、docs、pyproject.toml、requirements 和 CI YAML 不得单行化。
+- Markdown 必须保持多行标题、列表和 fenced code block。
+- pyproject.toml 必须保持标准多行 TOML。
+- `.github/workflows/ci.yml` 必须保持标准多行 YAML。
+- 修改文档或配置后，需要运行 `tests/test_text_file_formatting.py` 或全量 `pytest`。
 
 ## Data Ingestion 维护要求
 
@@ -34,6 +43,15 @@ InsightPilot Agent 是 synthetic-data-first 的本地分析自动化工作台，
 - Excel 依赖缺失只影响 Excel 模式，不影响 CSV、synthetic 或 workflow import。
 - TableRegistry metadata 不得包含完整 DataFrame。
 - 自定义数据必须记录 table metadata、schema mapping 和 warnings。
+
+## ColumnMapping 维护要求
+
+- ColumnMapping 定义维护在 `insightpilot/ingestion/mapping.py`。
+- 手动 mapping 优先于自动 schema 推断。
+- mapping 字段必须兼容旧 workflow 调用；未传 mapping 时应自动建议或 fallback。
+- column_mapping、mapping_source 和 mapping_warnings 必须写入 workflow state、trace、reviewer 和 report。
+- 无效 mapping 只能产生 warning 并移除无效列，不得导致 workflow 崩溃。
+- synthetic demo 不强制要求 mapping。
 
 ## SQL Safety Rules
 
@@ -53,6 +71,7 @@ InsightPilot Agent 是 synthetic-data-first 的本地分析自动化工作台，
 ## Custom Data Fallback
 
 - 对 `uploaded_files` / `database` 数据源，缺少 demo 表结构时不要崩溃。
+- 自定义数据优先使用 ColumnMapping；缺失时才使用 schema 推断。
 - metric_diagnosis / growth_trend 尽量使用日期列 + 数值列做通用趋势或异常检测。
 - experiment_analysis 缺少 control/treatment 分组和 outcome 时，应输出说明，不要硬跑。
 - causal_exploration 缺少 treatment/outcome 时，应输出 caveat，不要硬跑。

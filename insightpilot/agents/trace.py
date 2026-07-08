@@ -62,6 +62,9 @@ class AnalysisTrace:
     data_source_type: str = "synthetic"
     table_metadata_summary: dict[str, Any] = field(default_factory=dict)
     schema_warnings: list[str] = field(default_factory=list)
+    column_mapping: dict[str, Any] = field(default_factory=dict)
+    mapping_warnings: list[str] = field(default_factory=list)
+    mapping_source: str = "none"
     executed_queries: list[Any] = field(default_factory=list)
     route_taken: list[str] = field(default_factory=list)
     generated_findings: list[str] = field(default_factory=list)

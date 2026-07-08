@@ -34,13 +34,20 @@
 3. 上传 CSV。
 4. 修改 table name。
 5. 查看 preview、schema mapping 和 warnings。
-6. 选择 `growth_trend`。
-7. 运行分析。
+6. 在 Metric / Column Mapping 面板选择 date、metric 和 dimension。
+7. 选择 `growth_trend`。
+8. 运行分析。
 
 CLI 示例：
 
 ```powershell
 .\.venv\Scripts\python.exe examples/run_demo.py --data-source file --input-file data/sample.csv --table-name uploaded_table --goal-mode growth_trend
+```
+
+带字段映射：
+
+```powershell
+.\.venv\Scripts\python.exe examples/run_demo.py --data-source file --input-file data/sample.csv --table-name uploaded_table --goal-mode growth_trend --date-column date --metric-columns value --dimension-columns city
 ```
 
 预期输出：
@@ -65,7 +72,8 @@ CLI 示例：
 3. 选择 sheet。
 4. 修改 table name。
 5. 查看 schema mapping。
-6. 运行分析。
+6. 在 Metric / Column Mapping 面板确认 date column 和 metric columns。
+7. 运行分析。
 
 CLI 示例：
 
@@ -95,7 +103,8 @@ CLI 示例：
 4. 输入只读 SQL，例如 `SELECT * FROM metrics`。
 5. 点击 `Test Query / Load Data`。
 6. 查看 preview、schema mapping 和 warnings。
-7. 运行分析。
+7. 在 Metric / Column Mapping 面板选择字段。
+8. 运行分析。
 
 CLI 示例：
 

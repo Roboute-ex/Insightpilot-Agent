@@ -1,51 +1,145 @@
 # InsightPilot Agent
 
-InsightPilot Agent 是 synthetic-data-first 的本地分析自动化工作台，用于学习研究、数据分析自动化、业务分析工作流实践和 Agent 工程化实践。项目默认使用 deterministic rule-based workflow，不接入在线 LLM，不要求 API key。
+## 1. 项目简介
 
-当前版本为 `0.3.0`：Data Ingestion and External Data Connectors。v0.1 是基础分析能力合并版；v0.2 聚焦 Agent workflow、trace、reviewer、optional LangGraph fallback 和 CI；v0.3 增加 CSV / Excel upload、database query ingestion、schema profiling 和 custom data workflow。
+InsightPilot Agent 是一个 synthetic-data-first 的本地数据分析自动化工作台。它支持内置 demo 数据、CSV / Excel 上传、只读数据库查询，并把自然语言问题转成可复核的本地分析流程。
 
-## 核心能力
+项目默认使用 deterministic rule-based workflow，不接入在线 LLM，不要求 API key。它适用于学习研究、数据分析自动化、业务分析工作流实践和 Agent 工程化实践。
 
-- Synthetic demo data：继续作为默认数据源，三个 demo 场景保持可用。
+当前版本为 `0.4.0`，主题是 Usability, Metric Mapping UI and Documentation Polish。v0.4 在 v0.3 数据接入能力之上，增加 Metric / Column Mapping，用于手动指定日期列、指标列、维度列、实验分组列、处理变量和结果变量。
+
+## 2. 项目目标
+
+InsightPilot Agent 试图解决的问题是：如何把自然语言业务问题转换为可复盘、可测试、可解释的本地数据分析流程。
+
+项目将数据读取、schema profiling、指标识别、分析计划、统计检验、归因分析、reviewer 检查和报告输出串成闭环。它强调本地可运行、deterministic、可复现和易于扩展。
+
+在不接入真实外部服务的前提下，项目展示了一个数据分析 Agent 的工程化结构：从数据源进入，到 workflow state，再到 trace、reviewer 和 report。
+
+## 3. 核心能力
+
+- Synthetic demo data：内置三类可解释 synthetic 场景。
 - CSV / Excel upload：支持 CSV、xlsx、xlsm、xls，Excel 可选择 sheet。
-- Database query ingestion：支持 SQLite 和 SQLAlchemy URL，只允许只读 SELECT/WITH 查询。
-- Schema mapping：自动识别日期列、数值列、维度列、候选指标列和 warnings。
-- TableRegistry：统一管理内存表、metadata 和 DuckDB 可注册表。
-- Generic analysis fallback：自定义数据缺少 demo 表结构时，自动退化为通用 profile、趋势或限制说明。
-- WorkflowState / AnalysisTrace / ReviewerResult：记录 data_source_type、table_metadata、schema_warnings、route_taken、reviewer score。
+- Database query ingestion：支持 SQLite 和 SQLAlchemy URL，只允许只读 SELECT/WITH。
+- Schema mapping and validation：识别日期列、数值列、维度列、候选指标列和 warnings。
+- Metric / Column Mapping：手动选择 date、metric、dimension、group、treatment、outcome。
+- Metric dictionary and resolver：维护指标定义、公式和关键词解析规则。
+- Analysis Goal Mode：支持 auto 和手动目标模式。
+- WorkflowState / route_taken：记录 workflow 的中心状态和节点路径。
+- AnalysisTrace：记录 trace_id、created_at、backend、数据源、字段映射和错误。
+- ReviewerResult with score：输出 status、score、checks、issues、suggestions。
+- DuckDB tools：本地只读 SQL 查询和表注册。
+- Anomaly detection：比较目标日期与前 7 日均值。
+- Dimension attribution：按维度拆解变化贡献。
+- A/B experiment analysis：输出 sample_size、p_value 和区间估计。
+- Lightweight causal exploration：提供探索性调整分析。
+- Markdown report：生成结构化分析报告。
+- Streamlit UI：提供本地交互工作台。
+- CLI demo：支持 synthetic、file、database 三种入口。
+- GitHub Actions CI：Python 3.11 + pytest。
 
-## 数据安全边界
+## 4. 项目组成部分
 
-- 不要提交真实数据、上传文件、数据库查询结果或本地数据库文件。
-- 不要提交 database URL、账号、密码、token、cookie 或 `.streamlit/secrets.toml`。
-- 上传文件和数据库查询结果默认只在当前会话内存中处理，不写入仓库。
-- Database query 仅允许单条 SELECT/WITH，禁止写操作 SQL。
-- 报告中只展示 masked database URL 或 source_name，不展示明文密码。
-- 自定义数据分析结果不应被描述为真实业务结论。
+| 目录 | 职责 |
+| --- | --- |
+| `app/` | Streamlit 本地交互 UI。 |
+| `examples/` | CLI demo 和本地运行入口。 |
+| `insightpilot/data/` | synthetic demo data 生成。 |
+| `insightpilot/ingestion/` | CSV/Excel/database 读取、字段映射、表注册和校验。 |
+| `insightpilot/metrics/` | 指标字典和指标解析。 |
+| `insightpilot/planning/` | deterministic planner 和 Analysis Goal Mode。 |
+| `insightpilot/tools/` | DuckDB、本地 profiling 等工具。 |
+| `insightpilot/analysis/` | 异常检测、归因、实验分析和轻量因果探索。 |
+| `insightpilot/agents/` | WorkflowState、workflow、trace、reviewer 和 optional LangGraph fallback。 |
+| `insightpilot/reports/` | Markdown report 和报告写出工具。 |
+| `insightpilot/visualization/` | Plotly 图表辅助函数。 |
+| `docs/` | 项目路线、demo、数据接入和字段映射文档。 |
+| `tests/` | pytest 覆盖。 |
+| `.github/workflows/` | GitHub Actions CI。 |
 
-## 快速开始
+## 5. 工作流概览
+
+```text
+Data Source
+  -> TableRegistry
+  -> Schema Mapping / Validation
+  -> Metric / Column Mapping
+  -> Metric Resolver
+  -> Planner
+  -> Workflow Router
+  -> Analysis Tools
+  -> Reviewer
+  -> Trace
+  -> Markdown Report / Streamlit UI
+```
+
+Data Source 可以是 synthetic demo data、上传文件或数据库查询结果。TableRegistry 将表和 metadata 放入内存。Schema Mapping / Validation 给出字段候选和 warnings。Metric / Column Mapping 允许用户手动覆盖自动推断。Planner 根据问题和 goal_mode 生成计划。Workflow Router 根据 intent 和 goal_mode 选择分析路径。Analysis Tools 执行异常、归因、实验或通用 fallback。Reviewer 检查质量和边界。Trace 和 Report 输出可复核记录。
+
+## 6. 数据来源
+
+### Synthetic demo data
+
+默认数据源是 synthetic demo data。它用于稳定演示和测试，不代表真实业务结论。
+
+### Upload CSV / Excel
+
+Streamlit 支持上传 CSV、xlsx、xlsm 和 xls。Excel 支持选择 sheet。上传文件默认只在当前会话内存中读取，项目不保存文件。Streamlit file upload 的大小限制由 Streamlit 运行配置控制，项目本身不承诺无限大小。
+
+### Database query
+
+Database query 通过 SQLAlchemy 和 pandas 读取查询结果。SQLite 可直接使用；其他数据库需要用户自行安装对应驱动。查询只允许 SELECT / WITH，并会阻断写操作和多语句。
+
+## 7. Analysis Goal Mode
+
+Analysis Goal Mode 是 workflow routing signal。默认值为 `auto`，系统使用 deterministic keyword rules 自动识别；如果用户手动选择目标模式，则手动选择优先。
+
+- `auto`
+- `metric_diagnosis`
+- `growth_trend`
+- `experiment_analysis`
+- `content_performance`
+- `live_quality`
+- `causal_exploration`
+- `periodic_report`
+
+在 synthetic demo data 下，workflow 会优先走对应的专用分析路径。在 uploaded_files 或 database 下，workflow 会优先使用 Column Mapping；如果映射不完整，则进入 generic analysis fallback 并输出 caveat。
+
+## 8. Metric / Column Mapping
+
+v0.4 增加 Metric / Column Mapping。上传自定义数据或读取数据库查询结果后，用户可以手动指定：
+
+- `date_column`
+- `metric_columns`
+- `dimension_columns`
+- `group_column`
+- `treatment_column`
+- `outcome_column`
+- `time_grain`
+
+手动 mapping 优先于自动 schema 推断。mapping 会写入 WorkflowState、AnalysisTrace、ReviewerResult 和 Markdown Report。如果 mapping 不完整，系统会 fallback 到 generic analysis，并说明需要补充哪些字段。
+
+## 9. 快速开始
 
 ```powershell
+cd "C:\Users\1330718\Documents\insightpilot-agent"
 py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe examples/run_demo.py --scenario transaction
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-如果 PowerShell 不允许运行 `Activate.ps1`，可以直接使用 `.venv` 内的 Python：
+如果已经存在 `.venv`，可以直接安装依赖并运行测试：
 
 ```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-## CLI 示例
+## 10. CLI 示例
 
 Synthetic：
 
 ```powershell
 .\.venv\Scripts\python.exe examples/run_demo.py --scenario transaction --goal-mode metric_diagnosis
-.\.venv\Scripts\python.exe examples/run_demo.py --scenario content --goal-mode experiment_analysis
-.\.venv\Scripts\python.exe examples/run_demo.py --scenario live --goal-mode live_quality
 ```
 
 CSV：
@@ -66,57 +160,83 @@ SQLite：
 .\.venv\Scripts\python.exe examples/run_demo.py --data-source database --database-url sqlite:///local.db --query "SELECT * FROM metrics" --table-name db_table --goal-mode growth_trend
 ```
 
-Optional LangGraph：
+带字段映射的 CSV：
 
 ```powershell
-.\.venv\Scripts\python.exe examples/run_demo.py --scenario transaction --goal-mode metric_diagnosis --use-langgraph
+.\.venv\Scripts\python.exe examples/run_demo.py --data-source file --input-file data/sample.csv --table-name uploaded_table --goal-mode growth_trend --date-column date --metric-columns revenue,orders --dimension-columns city,channel
 ```
 
-## Streamlit
+## 11. Streamlit 使用方式
 
 ```powershell
 .\.venv\Scripts\python.exe -m streamlit run app/ui_streamlit.py
 ```
 
-页面支持三种 Data Source：
+页面区域包括：
 
-- Synthetic demo data：选择 demo 场景、goal_mode 和 workflow backend。
-- Upload CSV / Excel：上传多个文件，选择 Excel sheet，编辑 table name，查看 preview、schema mapping 和 warnings。
-- Database query：输入 SQLAlchemy URL 和只读 SQL，加载 SQLite 或其他已安装驱动支持的数据源。
+- Data Source
+- Demo Scenario
+- Upload CSV / Excel
+- Database query
+- Analysis Goal Mode
+- Workflow Backend
+- Metric / Column Mapping
+- Run Analysis
+- Findings
+- Reviewer
+- Trace
+- Report
 
-## Database Connector
+在 Upload CSV / Excel 和 Database query 模式下，用户可以选择表、查看自动建议 mapping，并手动选择 date、metric、dimension、group、treatment、outcome 和 time grain。
 
-- SQLite 可直接使用：`sqlite:///path/to/local.db`。
-- 其他 SQLAlchemy URL 需要用户自行安装对应数据库驱动。
-- README、报告和日志不鼓励保存真实连接信息。
-- SQL safety 会拒绝 DROP、DELETE、INSERT、UPDATE、ALTER、CREATE、TRUNCATE、MERGE、REPLACE、GRANT、REVOKE、ATTACH、DETACH、COPY 等写操作。
+## 12. 数据安全边界
 
-## Analysis Goal Mode
+- 不提交真实数据。
+- 不提交上传文件。
+- 不提交数据库查询结果。
+- 不提交 database URL、密码、token 或 cookie。
+- 不提交 `.streamlit/secrets.toml`。
+- 数据默认在内存中处理。
+- SQL 只读检查是保守字符串检查，不是完整 SQL parser。
+- 自定义数据分析结果不应被描述为真实业务结论。
 
-默认 `goal_mode=auto`，系统使用 deterministic keyword rules 自动识别；用户手动选择时优先于自动识别。
+## 13. 测试
 
-可用枚举值：
+```powershell
+.\.venv\Scripts\python.exe -m pytest
+```
 
-- `auto`
-- `metric_diagnosis`
-- `growth_trend`
-- `experiment_analysis`
-- `content_performance`
-- `live_quality`
-- `causal_exploration`
-- `periodic_report`
+测试覆盖：
 
-## CI
+- synthetic data
+- planner
+- workflow routing
+- trace
+- reviewer
+- ingestion
+- column mapping
+- SQL safety
+- CLI
+- Streamlit import
+- formatting checks
 
-`.github/workflows/ci.yml` 使用 Python 3.11，安装 `requirements.txt` 并运行 `python -m pytest`。CI 不安装 `requirements-langgraph.txt`，继续验证 optional LangGraph fallback。
+## 14. 版本路线
 
-## 限制说明
+- v0.1：基础分析能力合并版。
+- v0.2：Agent workflow、trace、reviewer、optional LangGraph fallback 和 CI。
+- v0.3：CSV / Excel / database ingestion、schema profiling、custom data workflow。
+- v0.4：Metric Mapping UI、custom data usability、documentation polish、format normalization。
+- next：metric mapping UI 继续打磨、user-selected SQL templates、report export polish。
 
-- synthetic demo data 仍是默认安全演示路径。
-- 自定义数据通用分析依赖字段名和 dtype 推断，复杂口径需要后续手动映射 UI。
-- v0.3 不保存上传文件或数据库查询结果。
-- 轻量因果探索不替代严谨识别设计。
+## 15. 限制说明
 
-## 后续计划
+- 当前不接入在线 LLM。
+- 当前不做生产级数据库权限管理。
+- 当前不保存用户上传数据。
+- 自定义数据分析依赖字段 mapping 和数据质量。
+- 轻量因果分析仅用于探索性分析。
+- optional LangGraph 只做 workflow 编排，不改变 no API key 边界。
 
-- v0.4：metric mapping UI、user-selected date/metric/dimension columns、SQL template hardening、report export polish。
+## 16. License / Notes
+
+No license file has been added yet.

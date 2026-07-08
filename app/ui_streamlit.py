@@ -18,6 +18,7 @@ from insightpilot.agents.workflow import run_agent_analysis
 from insightpilot.data.synthetic import generate_all_demo_data
 from insightpilot.ingestion.db_loader import is_safe_select_query, mask_database_url, run_database_query
 from insightpilot.ingestion.file_loader import get_excel_sheet_names, load_uploaded_file
+from insightpilot.ingestion.mapping import suggest_column_mapping
 from insightpilot.ingestion.table_registry import TableRegistry
 from insightpilot.planning.goal_modes import GOAL_MODE_OPTIONS
 from insightpilot.visualization.charts import build_ab_test_comparison_chart, build_contribution_bar_chart
@@ -83,6 +84,74 @@ def _render_registry(registry: TableRegistry) -> None:
             st.dataframe(registry.get_table(table_name).head(20), use_container_width=True)
 
 
+def _select_optional(label: str, options: list[str], default: str | None, key: str) -> str | None:
+    values = [""] + options
+    index = values.index(default) if default in values else 0
+    selected = st.selectbox(label, values, index=index, key=key)
+    return selected or None
+
+
+def _render_column_mapping_panel(registry: TableRegistry, goal_mode: str) -> dict[str, Any] | None:
+    if not registry.list_tables():
+        return None
+    st.subheader("Metric / Column Mapping")
+    table_name = st.selectbox("Mapping table", registry.list_tables(), key="mapping_table")
+    df = registry.get_table(table_name)
+    suggestion = suggest_column_mapping(table_name, df)
+    columns = [str(column) for column in df.columns]
+    numeric_columns = [str(column) for column in df.columns if pd.api.types.is_numeric_dtype(df[column])]
+    dimension_candidates = [
+        column
+        for column in columns
+        if column not in numeric_columns or column in suggestion.dimension_columns
+    ]
+
+    st.caption("手动选择会优先于自动 schema 推断；不完整时会进入通用 fallback 并写入 caveat。")
+    if goal_mode in {"metric_diagnosis", "growth_trend"}:
+        st.info("建议选择 date column、至少一个 metric column，以及可选 dimension columns。")
+    elif goal_mode == "experiment_analysis":
+        st.info("建议选择 group column 和至少一个 metric column。")
+    elif goal_mode == "causal_exploration":
+        st.info("建议选择 treatment column、outcome column 和可选维度/控制变量。")
+
+    col_left, col_right = st.columns(2)
+    with col_left:
+        date_column = _select_optional("Date column", columns, suggestion.date_column, "mapping_date")
+        metric_columns = st.multiselect(
+            "Metric columns",
+            columns,
+            default=[column for column in suggestion.metric_columns if column in columns],
+            key="mapping_metrics",
+            help=f"Numeric candidates: {', '.join(numeric_columns[:8]) or 'none'}",
+        )
+        dimension_columns = st.multiselect(
+            "Dimension columns",
+            columns,
+            default=[column for column in suggestion.dimension_columns if column in columns],
+            key="mapping_dimensions",
+            help=f"Dimension candidates: {', '.join(dimension_candidates[:8]) or 'none'}",
+        )
+    with col_right:
+        group_column = _select_optional("Group column", columns, suggestion.group_column, "mapping_group")
+        treatment_column = _select_optional("Treatment column", columns, suggestion.treatment_column, "mapping_treatment")
+        outcome_column = _select_optional("Outcome column", columns, suggestion.outcome_column, "mapping_outcome")
+        time_grain = st.selectbox("Time grain", ["day", "week", "month"], index=0, key="mapping_time_grain")
+
+    mapping = {
+        "table_name": table_name,
+        "date_column": date_column,
+        "metric_columns": metric_columns,
+        "dimension_columns": dimension_columns,
+        "group_column": group_column,
+        "treatment_column": treatment_column,
+        "outcome_column": outcome_column,
+        "time_grain": time_grain,
+    }
+    st.markdown("#### Mapping Summary")
+    st.json(_safe_json(mapping))
+    return mapping
+
+
 def _load_uploaded_registry(uploaded_files: list[Any]) -> TableRegistry:
     registry = TableRegistry()
     for index, uploaded_file in enumerate(uploaded_files):
@@ -131,6 +200,12 @@ def _render_result(result: dict[str, Any]) -> None:
         st.json(_safe_json(result["plan"]))
     with data_tab:
         st.write(f"Data Source: {result.get('data_source_type', 'synthetic')}")
+        st.markdown("#### Mapping Summary")
+        st.write(f"Mapping Source: {result.get('mapping_source', 'none')}")
+        st.json(_safe_json(result.get("column_mapping", {})))
+        mapping_warnings = result.get("mapping_warnings", [])
+        if mapping_warnings:
+            st.warning("\n".join(f"- {warning}" for warning in mapping_warnings))
         st.json(_safe_json(result.get("table_metadata", {})))
         _render_artifacts(result)
     with findings_tab:
@@ -164,6 +239,7 @@ def main() -> None:
 
     tables: dict[str, pd.DataFrame] = {}
     table_metadata: dict[str, Any] | None = None
+    column_mapping: dict[str, Any] | None = None
     data_source_type = "synthetic"
     default_question = "请对当前数据做通用趋势和结构分析。"
 
@@ -187,6 +263,7 @@ def main() -> None:
             tables = registry.to_duckdb_tables()
             table_metadata = registry.metadata
             _render_registry(registry)
+            column_mapping = _render_column_mapping_panel(registry, selected_goal_mode)
         else:
             st.info("上传 CSV 或 Excel 文件后，可以预览 schema mapping 和运行分析。")
     else:
@@ -220,6 +297,7 @@ def main() -> None:
             tables = registry.to_duckdb_tables()
             table_metadata = registry.metadata
             _render_registry(registry)
+            column_mapping = _render_column_mapping_panel(registry, selected_goal_mode)
 
     if "question" not in st.session_state:
         st.session_state.question = default_question
@@ -238,6 +316,7 @@ def main() -> None:
             use_langgraph=use_langgraph,
             data_source_type=data_source_type,
             table_metadata=table_metadata,
+            column_mapping=column_mapping,
         )
         _render_result(result)
 

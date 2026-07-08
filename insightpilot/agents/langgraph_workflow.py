@@ -44,6 +44,9 @@ class GraphState(TypedDict, total=False):
     intermediate_results: dict[str, Any]
     findings: list[str]
     caveats: list[str]
+    column_mapping: dict[str, Any]
+    mapping_warnings: list[str]
+    mapping_source: str
     reviewer_status: str
     reviewer_issues: list[str]
     reviewer_suggestions: list[str]
@@ -63,6 +66,7 @@ def run_langgraph_workflow(
     goal_mode: str = "auto",
     data_source_type: str = "synthetic",
     table_metadata: dict[str, Any] | None = None,
+    column_mapping: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run the optional LangGraph graph and return the standard workflow result."""
 
@@ -90,6 +94,7 @@ def run_langgraph_workflow(
         goal_mode,
         data_source_type=data_source_type,
         table_metadata=table_metadata,
+        column_mapping=column_mapping,
     )
     initial_state.intermediate_results["workflow_backend"] = WORKFLOW_BACKEND_LANGGRAPH
 

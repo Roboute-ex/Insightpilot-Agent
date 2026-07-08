@@ -55,6 +55,9 @@ class WorkflowState:
     table_metadata: dict[str, Any] = field(default_factory=dict)
     schema_warnings: list[str] = field(default_factory=list)
     user_table_mode: bool = False
+    column_mapping: dict[str, Any] = field(default_factory=dict)
+    mapping_warnings: list[str] = field(default_factory=list)
+    mapping_source: str = "none"
     reviewer_status: str = ""
     reviewer_issues: list[str] = field(default_factory=list)
     reviewer_suggestions: list[str] = field(default_factory=list)
@@ -89,6 +92,7 @@ def create_initial_state(
     goal_mode: str = "auto",
     data_source_type: str = "synthetic",
     table_metadata: dict[str, Any] | None = None,
+    column_mapping: dict[str, Any] | None = None,
 ) -> WorkflowState:
     """Create a safe initial state for a workflow run."""
 
@@ -103,4 +107,6 @@ def create_initial_state(
         data_source_type=data_source_type,
         table_metadata=table_metadata or {},
         user_table_mode=data_source_type != "synthetic",
+        column_mapping=column_mapping or {},
+        mapping_source="user_selected" if column_mapping else "none",
     )
