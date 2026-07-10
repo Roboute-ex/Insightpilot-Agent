@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from typing import Any
+from uuid import uuid4
 
 import pandas as pd
 
@@ -19,6 +21,8 @@ def _json_safe(value: Any) -> Any:
             "row_count": int(len(value)),
             "columns": [str(column) for column in value.columns],
         }
+    if value.__class__.__module__.startswith("plotly"):
+        return {"type": value.__class__.__name__, "serialized": False}
     if isinstance(value, dict):
         return {str(key): _json_safe(item) for key, item in value.items()}
     if isinstance(value, (list, tuple, set)):
@@ -26,6 +30,11 @@ def _json_safe(value: Any) -> Any:
     if hasattr(value, "item"):
         try:
             return value.item()
+        except (TypeError, ValueError):
+            return str(value)
+    if hasattr(value, "to_dict") and callable(value.to_dict):
+        try:
+            return _json_safe(value.to_dict())
         except (TypeError, ValueError):
             return str(value)
     return value
@@ -40,6 +49,8 @@ class WorkflowState:
     """
 
     user_question: str = ""
+    trace_id: str = field(default_factory=lambda: str(uuid4()))
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     goal_mode: str = "auto"
     goal_mode_display_name: str = "自动识别"
     goal_mode_source: str = "auto_detected"
@@ -58,6 +69,12 @@ class WorkflowState:
     column_mapping: dict[str, Any] = field(default_factory=dict)
     mapping_warnings: list[str] = field(default_factory=list)
     mapping_source: str = "none"
+    selected_playbook_id: str | None = None
+    playbook_source: str = "none"
+    playbook_parameters: dict[str, Any] = field(default_factory=dict)
+    chart_specs: list[dict[str, Any]] = field(default_factory=list)
+    run_manifest: dict[str, Any] = field(default_factory=dict)
+    export_formats: list[str] = field(default_factory=list)
     reviewer_status: str = ""
     reviewer_issues: list[str] = field(default_factory=list)
     reviewer_suggestions: list[str] = field(default_factory=list)
@@ -93,6 +110,8 @@ def create_initial_state(
     data_source_type: str = "synthetic",
     table_metadata: dict[str, Any] | None = None,
     column_mapping: dict[str, Any] | None = None,
+    playbook_id: str | None = None,
+    playbook_parameters: dict[str, Any] | None = None,
 ) -> WorkflowState:
     """Create a safe initial state for a workflow run."""
 
@@ -109,4 +128,7 @@ def create_initial_state(
         user_table_mode=data_source_type != "synthetic",
         column_mapping=column_mapping or {},
         mapping_source="user_selected" if column_mapping else "none",
+        selected_playbook_id=playbook_id,
+        playbook_source="user_selected" if playbook_id and playbook_id not in {"auto", "auto_recommended"} else "none",
+        playbook_parameters=playbook_parameters or {},
     )

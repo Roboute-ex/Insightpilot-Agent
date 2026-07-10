@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
 import pandas as pd
 
@@ -65,12 +66,24 @@ class AnalyticsEngine:
                 self._registered_tables.append(safe_name)
 
     def run_sql(self, query: str) -> pd.DataFrame:
+        return self.run_parameterized_sql(query)
+
+    def run_parameterized_sql(
+        self,
+        query: str,
+        parameters: list[Any] | dict[str, Any] | None = None,
+    ) -> pd.DataFrame:
+        """Execute one read-only statement with bound scalar values."""
+
         self._validate_query(query)
         try:
-            return self._connection.execute(query).fetchdf()
+            if parameters is None:
+                return self._connection.execute(query).fetchdf()
+            return self._connection.execute(query, parameters).fetchdf()
         except Exception as exc:
             raise ValueError(
-                f"Query failed. Check that referenced tables exist. Registered tables: "
+                "只读参数化查询执行失败。请检查字段、参数类型和已注册表。"
+                " Registered tables: "
                 f"{', '.join(self.list_tables()) or 'none'}"
             ) from exc
 
@@ -107,3 +120,13 @@ class AnalyticsEngine:
         blocked = sorted(tokens & WRITE_TOKENS)
         if blocked:
             raise ValueError(f"Unsafe SQL token detected: {', '.join(blocked)}")
+
+
+def run_parameterized_sql(
+    query: str,
+    parameters: list[Any] | dict[str, Any] | None = None,
+) -> pd.DataFrame:
+    """Run a standalone read-only DuckDB query, primarily for scalar queries."""
+
+    engine = AnalyticsEngine()
+    return engine.run_parameterized_sql(query, parameters)

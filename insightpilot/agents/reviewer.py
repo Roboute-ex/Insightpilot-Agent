@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+import re
 from typing import Any
 
 from insightpilot.agents.trace import AnalysisTrace
@@ -38,6 +39,12 @@ def _combined_text(trace: AnalysisTrace) -> str:
         str(trace.column_mapping),
         " ".join(trace.mapping_warnings),
         trace.mapping_source,
+        str(trace.selected_playbook_id),
+        trace.playbook_source,
+        str(trace.playbook_parameters_summary),
+        str(trace.chart_specs),
+        str(trace.manifest_summary),
+        str(trace.playbook_result_summary),
         str(trace.reviewer_checks),
         " ".join(trace.errors),
     ]
@@ -56,10 +63,16 @@ def review_analysis(trace: AnalysisTrace) -> ReviewerResult:
     """Review whether the analysis trace contains required safeguards."""
 
     text = _combined_text(trace)
+    playbook_selected = bool(trace.selected_playbook_id)
+    playbook_result = trace.playbook_result_summary if isinstance(trace.playbook_result_summary, dict) else {}
+    playbook_metadata = playbook_result.get("metadata", {}) if isinstance(playbook_result.get("metadata"), dict) else {}
+    result_table_summaries = playbook_result.get("result_tables", {}) if isinstance(playbook_result.get("result_tables"), dict) else {}
+    unsafe_sql_pattern = re.compile(r"\b(drop|delete|insert|update|alter|create|truncate|merge|replace|attach|copy)\b", re.IGNORECASE)
+    credential_pattern = re.compile(r"://[^:/@\s]+:[^*@/\s]+@")
     checks: dict[str, bool] = {
         "has_goal_mode": bool(trace.goal_mode),
         "has_plan": bool(trace.analysis_plan),
-        "has_metrics": bool(trace.selected_metrics),
+        "has_metrics": bool(trace.selected_metrics) or trace.selected_playbook_id in {"data_profile", "periodic_summary"},
         "has_findings": bool(trace.generated_findings),
         "has_route_taken": bool(trace.route_taken),
         "has_caveats": bool(trace.caveats) or _has_synthetic_disclaimer(text),
@@ -85,6 +98,27 @@ def review_analysis(trace: AnalysisTrace) -> ReviewerResult:
         "custom_data_has_date_selection_when_trend": trace.data_source_type == "synthetic"
         or trace.goal_mode not in {"metric_diagnosis", "growth_trend"}
         or bool(trace.column_mapping.get("date_column")),
+        "has_playbook_when_selected": not playbook_selected or bool(playbook_result),
+        "playbook_requirements_satisfied": not playbook_selected or bool(playbook_metadata.get("requirements_satisfied")),
+        "playbook_parameters_valid": not playbook_selected or bool(playbook_metadata.get("parameters_valid")),
+        "safe_query_generated": not playbook_selected or (
+            bool(playbook_metadata.get("safe_query_generated"))
+            and all(not unsafe_sql_pattern.search(str(record.get("query", ""))) for record in trace.executed_queries if isinstance(record, dict))
+        ),
+        "chart_specs_valid": not playbook_selected or (
+            bool(trace.chart_specs)
+            and all(
+                isinstance(spec, dict) and bool(spec.get("chart_id")) and bool(spec.get("chart_type")) and bool(spec.get("table_key"))
+                for spec in trace.chart_specs
+            )
+        ),
+        "manifest_generated": not playbook_selected or bool(trace.manifest_summary.get("run_id")),
+        "mapping_matches_playbook": not playbook_selected or bool(playbook_metadata.get("requirements_satisfied")),
+        "result_tables_available": not playbook_selected or bool(result_table_summaries),
+        "export_contains_no_raw_credentials": not credential_pattern.search(text),
+        "export_limitations_reported": not playbook_selected or any(
+            term in text for term in ("不代表真实", "内存", "限制", "caveat", "不包含", "原始数据")
+        ),
     }
     if trace.mapping_warnings and "mapping" not in text and "字段" not in text:
         checks["mapping_warnings_reported"] = False
@@ -154,6 +188,46 @@ def review_analysis(trace: AnalysisTrace) -> ReviewerResult:
             "趋势/诊断模式缺少日期列选择。",
             "请选择日期列和至少一个指标列以启用趋势或异常检测。",
         ),
+        "has_playbook_when_selected": (
+            "已选择 playbook，但 trace 中缺少执行结果。",
+            "确认 selected_playbook_id 已传入统一 executor 并写入 trace。",
+        ),
+        "playbook_requirements_satisfied": (
+            "当前 Column Mapping 不满足 playbook requirements。",
+            "根据剧本补充所需日期列、指标列、维度列、分组列或处理/结果列。",
+        ),
+        "playbook_parameters_valid": (
+            "playbook 参数校验未通过。",
+            "复核日期范围、Top N、滚动窗口、置信水平和字段参数。",
+        ),
+        "safe_query_generated": (
+            "playbook 未生成可复核的安全查询或查询安全检查失败。",
+            "仅使用 allowlist identifier 与绑定参数重新生成只读 SQL template。",
+        ),
+        "chart_specs_valid": (
+            "ChartSpec 缺少必要字段。",
+            "为每张图补充 chart_id、chart_type 和结果表 table_key。",
+        ),
+        "manifest_generated": (
+            "playbook 运行缺少 RunManifest。",
+            "生成不含原始数据和凭据的 manifest 配置摘要。",
+        ),
+        "mapping_matches_playbook": (
+            "Column Mapping 与所选 playbook 不匹配。",
+            "按剧本要求补充具体字段角色后重新执行。",
+        ),
+        "result_tables_available": (
+            "playbook 未生成结果表。",
+            "复核映射与参数，确保至少生成一张结构化分析结果表。",
+        ),
+        "export_contains_no_raw_credentials": (
+            "运行上下文可能包含未遮罩凭据。",
+            "移除完整 database URL，并对密码、token 和 secret 做遮罩。",
+        ),
+        "export_limitations_reported": (
+            "缺少导出与复现边界说明。",
+            "说明导出不含原始数据或凭据，manifest 仅用于复现配置。",
+        ),
     }
 
     for check_name, passed in checks.items():
@@ -166,6 +240,8 @@ def review_analysis(trace: AnalysisTrace) -> ReviewerResult:
         severe_failures.append("missing_plan")
     if not checks["has_findings"]:
         severe_failures.append("missing_findings")
+    if playbook_selected and not checks["safe_query_generated"]:
+        severe_failures.append("unsafe_playbook_query")
     if any("missing table" in error.lower() or "critical" in error.lower() for error in trace.errors):
         severe_failures.append("critical_error")
     if trace.errors:
@@ -196,6 +272,16 @@ def review_analysis(trace: AnalysisTrace) -> ReviewerResult:
         "manual_mapping_respected": 20,
         "custom_data_has_metric_selection": 15,
         "custom_data_has_date_selection_when_trend": 10,
+        "has_playbook_when_selected": 20,
+        "playbook_requirements_satisfied": 20,
+        "playbook_parameters_valid": 20,
+        "safe_query_generated": 35,
+        "chart_specs_valid": 10,
+        "manifest_generated": 12,
+        "mapping_matches_playbook": 15,
+        "result_tables_available": 20,
+        "export_contains_no_raw_credentials": 35,
+        "export_limitations_reported": 8,
     }
     for check_name, passed in checks.items():
         if not passed:

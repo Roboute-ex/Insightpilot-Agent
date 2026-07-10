@@ -6,7 +6,7 @@ InsightPilot Agent 是一个 synthetic-data-first 的本地数据分析自动化
 
 项目默认使用 deterministic rule-based workflow，不接入在线 LLM，不要求 API key。它适用于学习研究、数据分析自动化、业务分析工作流实践和 Agent 工程化实践。
 
-当前版本为 `0.4.0`，主题是 Usability, Metric Mapping UI and Documentation Polish。v0.4 在 v0.3 数据接入能力之上，增加 Metric / Column Mapping，用于手动指定日期列、指标列、维度列、实验分组列、处理变量和结果变量。
+当前版本为 `0.5.0`，主题是 Reusable Analysis Playbooks, Visual Diagnostics and Export Bundles。v0.5 在 Column Mapping 基础上增加可复用分析剧本、安全 SQL template、结构化 Plotly 图表、RunManifest，以及 Markdown、离线 HTML、Excel、Manifest JSON 和 ZIP 分析包。
 
 ## 2. 项目目标
 
@@ -226,7 +226,8 @@ SQLite：
 - v0.2：Agent workflow、trace、reviewer、optional LangGraph fallback 和 CI。
 - v0.3：CSV / Excel / database ingestion、schema profiling、custom data workflow。
 - v0.4：Metric Mapping UI、custom data usability、documentation polish、format normalization。
-- next：metric mapping UI 继续打磨、user-selected SQL templates、report export polish。
+- v0.5：Analysis Playbooks、Visual Diagnostics、Run Manifest、Report Export Bundles。
+- next：多表 playbook 编排、更多本地统计诊断和导出模板治理。
 
 ## 15. 限制说明
 
@@ -240,3 +241,78 @@ SQLite：
 ## 16. License / Notes
 
 No license file has been added yet.
+
+## 17. Analysis Playbooks
+
+Analysis Playbook 是一套可复用、可验证的分析配置。每个 playbook 声明字段要求、参数、执行器、结果章节和图表类型。`ColumnMapping` 是统一输入契约，playbook 不能绕过 mapping validation。
+
+不传 `playbook_id` 时，系统继续执行 v0.4 自动工作流。显式选择 playbook 时，执行路径会记录 `select_playbook`、`validate_playbook`、`build_safe_query`、`execute_playbook`、`generate_charts` 和 `build_manifest`。
+
+## 18. Built-in Playbooks
+
+- `data_profile`：数据概览、缺失率、唯一值、重复行和数值分布。
+- `metric_trend`：按日、周或月聚合指标，计算环比、滚动均值和异常信号。
+- `period_comparison`：比较两个周期的绝对变化、相对变化和维度表现。
+- `dimension_contribution`：输出维度贡献值、占比、排名和 Others。
+- `experiment_comparison`：输出组间 lift、p-value、样本量和置信区间。
+- `causal_exploration`：输出 naive difference 与轻量调整结果，并保留因果解释边界。
+- `periodic_summary`：组合 profile、trend 和 top dimensions；日期字段缺失时安全降级。
+
+## 19. Visual Diagnostics
+
+`ChartSpec` 将图表类型、结果表、轴字段、排序和说明保存为 JSON 可序列化配置。图表工厂支持 time series、bar、grouped bar、contribution、histogram、box、missingness、confidence interval、metric card 和 table。
+
+图表只读取 playbook 结果表。空结果、缺失字段或绘图失败会生成 warning，不会阻断核心 findings。用于绘图的行数设有上限，时间序列按日期排序。
+
+## 20. Reproducible Run Manifest
+
+RunManifest 保存项目版本、run ID、数据来源摘要、表摘要、数据集指纹、问题、goal mode、workflow backend、playbook、参数、Column Mapping、route、reviewer 和 caveats。
+
+数据指纹用于判断输入是否变化。manifest 不包含完整 DataFrame、上传文件绝对路径、完整 database URL 或密码，也不保证恢复原始数据；它用于复现配置和核对输入版本。
+
+## 21. Report Exports
+
+- Markdown：完整结构化文字报告。
+- Interactive HTML：单文件离线报告，内嵌交互式 Plotly 图表。
+- Excel：Summary、Findings、Reviewer、Mapping、Manifest 和各结果表工作表。
+- Manifest JSON：可重新载入的安全配置。
+- ZIP Bundle：组合报告、manifest 和有限行数的分析结果 CSV。
+
+Streamlit 中的导出全部在内存生成。CLI 只在用户提供 `--export-format` 时写入 `--export-dir`；不会加入原始上传文件、数据库结果源表或凭据。
+
+## 22. v0.5 CLI Examples
+
+列出分析剧本：
+
+```powershell
+.\.venv\Scripts\python.exe examples/run_demo.py --list-playbooks
+```
+
+Synthetic profile：
+
+```powershell
+.\.venv\Scripts\python.exe examples/run_demo.py --scenario transaction --playbook data_profile
+```
+
+CSV trend：
+
+```powershell
+.\.venv\Scripts\python.exe examples/run_demo.py --data-source file --input-file data/sample.csv --table-name uploaded_table --date-column date --metric-columns revenue,orders --dimension-columns city,channel --playbook metric_trend --time-grain week --rolling-window 4
+```
+
+生成完整分析包：
+
+```powershell
+.\.venv\Scripts\python.exe examples/run_demo.py --scenario transaction --playbook periodic_summary --export-format markdown,html,excel,manifest,bundle
+```
+
+## 23. v0.5 Streamlit Flow
+
+1. 选择 synthetic、CSV / Excel 或只读 database query 数据源。
+2. 预览表结构与 validation warnings。
+3. 配置 Column Mapping。
+4. 选择 Analysis Goal Mode。
+5. 保留原自动工作流、使用 Auto recommended，或选择一个内置 playbook。
+6. 在 form 中配置日期范围、时间粒度、指标、维度、Top N 或实验参数。
+7. 运行分析并查看 Summary、Result Tables、Visual Diagnostics、Reviewer 和 Trace。
+8. 在 Export tab 准备内存导出，再下载所需格式。

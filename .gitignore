@@ -18,5 +18,9 @@ build/
 *.egg-info/
 reports/*.md
 reports/*.json
+reports/*.html
+reports/*.xlsx
+reports/*.zip
+reports/*.csv
 !reports/__init__.py
 .tmp_tests/

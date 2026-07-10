@@ -15,6 +15,7 @@ from insightpilot.agents.reviewer import review_analysis
 from insightpilot.agents.state import WorkflowState, create_initial_state
 from insightpilot.agents.trace import AnalysisTrace
 from insightpilot.config import REPORT_LIMITATION
+from insightpilot._version import __version__
 from insightpilot.ingestion.mapping import (
     ColumnMapping,
     normalize_column_mapping,
@@ -26,8 +27,12 @@ from insightpilot.ingestion.validation import validate_tables_for_workflow
 from insightpilot.metrics.dictionary import MetricDefinition
 from insightpilot.metrics.resolver import resolve_metrics_from_question
 from insightpilot.planning.planner import AnalysisPlan, create_analysis_plan
+from insightpilot.playbooks.executor import execute_playbook
+from insightpilot.playbooks.registry import get_playbook_registry
+from insightpilot.reports.manifest import RunManifest, fingerprint_dataframe, sanitize_manifest_value
 from insightpilot.reports.markdown import generate_markdown_report
 from insightpilot.tools.duckdb_engine import AnalyticsEngine
+from insightpilot.visualization.factory import build_charts
 
 
 WORKFLOW_BACKEND_RULE_BASED = "rule_based"
@@ -129,7 +134,8 @@ def _summarize_table_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
             "schema_mapping": item.get("schema_mapping", {}),
             "warnings": item.get("warnings", []),
         }
-    return summary
+    sanitized = sanitize_manifest_value(summary)
+    return sanitized if isinstance(sanitized, dict) else {}
 
 
 def _first_custom_table(state: WorkflowState, tables: dict[str, pd.DataFrame]) -> tuple[str, pd.DataFrame] | None:
@@ -377,6 +383,161 @@ def _create_plan_node(
     state.analysis_plan = plan.to_dict()
     state.intermediate_results["plan"] = plan
     return state
+
+
+def _mapping_for_recommendation(state: WorkflowState, tables: dict[str, pd.DataFrame]) -> ColumnMapping:
+    if state.column_mapping:
+        return _column_mapping_from_state(state)
+    if not tables:
+        return ColumnMapping()
+    if state.goal_mode in {"experiment_analysis", "causal_exploration"} and "experiments" in tables:
+        df = tables["experiments"]
+        return ColumnMapping(
+            table_name="experiments",
+            group_column="group" if "group" in df.columns else None,
+            treatment_column="group" if "group" in df.columns else None,
+            outcome_column="completion_rate" if "completion_rate" in df.columns else None,
+            metric_columns=["completion_rate"] if "completion_rate" in df.columns else [],
+            dimension_columns=[column for column in ["historical_activity", "historical_revenue", "city"] if column in df.columns],
+        )
+    table_name = "daily_metrics" if "daily_metrics" in tables else sorted(tables)[0]
+    return suggest_column_mapping(table_name, tables[table_name])
+
+
+def _run_playbook_node(
+    state: WorkflowState,
+    tables: dict[str, pd.DataFrame],
+    engine: AnalyticsEngine | None = None,
+) -> WorkflowState:
+    del engine
+    requested_id = state.selected_playbook_id
+    if requested_id in {"auto", "auto_recommended"}:
+        state.add_route("recommend_playbooks")
+        recommendations = get_playbook_registry().recommend(
+            state.goal_mode,
+            _mapping_for_recommendation(state, tables),
+        )
+        requested_id = recommendations[0].playbook_id if recommendations else "data_profile"
+        state.playbook_source = "auto_recommended"
+    else:
+        state.playbook_source = "user_selected"
+    state.selected_playbook_id = requested_id
+    state.add_route("select_playbook")
+    state.add_route("validate_playbook")
+    try:
+        state.intermediate_results["selected_playbook"] = get_playbook_registry().get(requested_id or "").to_dict()
+        execution = execute_playbook(
+            requested_id or "",
+            tables,
+            state.column_mapping or None,
+            state.playbook_parameters,
+            state.table_metadata,
+        )
+    except Exception as exc:
+        state.errors.append(f"playbook selection failed: {exc}")
+        state.findings = []
+        _append_unique(state.caveats, [f"分析剧本无法执行：{exc}"])
+        return state
+
+    state.add_route("build_safe_query")
+    state.add_route("execute_playbook")
+    state.executed_queries.extend(execution.executed_queries)
+    for query_record in execution.executed_queries:
+        if query_record.get("status") == "failed":
+            state.errors.append(
+                f"Playbook query failed: {query_record.get('template_id', 'unknown')} "
+                f"({query_record.get('purpose', '')})"
+            )
+    state.playbook_parameters = dict(execution.parameters)
+    state.chart_specs = list(execution.chart_specs)
+    mapping = execution.metadata.get("column_mapping", {})
+    if isinstance(mapping, dict) and mapping:
+        state.column_mapping = mapping
+        state.mapping_source = str(execution.metadata.get("mapping_source", state.mapping_source))
+        state.mapping_warnings = list(dict.fromkeys([*state.mapping_warnings, *execution.warnings]))
+        if not state.selected_metrics:
+            state.selected_metrics = list(mapping.get("metric_columns", []))
+    state.findings = list(execution.findings)
+    _append_unique(state.caveats, execution.caveats)
+    _append_unique(state.caveats, execution.warnings)
+    if execution.status == "FAIL":
+        state.errors.extend(
+            warning for warning in execution.warnings if warning not in state.errors
+        )
+    state.intermediate_results["summary"] = f"{execution.playbook_name}执行完成，状态为 {execution.status}。"
+    state.intermediate_results["playbook_result"] = execution.to_dict()
+    state.intermediate_results["result_tables"] = execution.result_tables
+    state.intermediate_results["artifacts"] = {
+        "playbook_id": execution.playbook_id,
+        "result_tables": execution.to_dict()["result_tables"],
+    }
+    state.intermediate_results["next_steps"] = [
+        "复核 Column Mapping、playbook 参数与 caveats 后再解释结果。"
+    ]
+    state.add_route("generate_charts")
+    chart_pairs = build_charts(execution.chart_specs, execution.result_tables)
+    state.intermediate_results["chart_pairs"] = chart_pairs
+    state.intermediate_results["charts"] = [figure for _, figure in chart_pairs]
+    return state
+
+
+def _build_manifest_node(
+    state: WorkflowState,
+    tables: dict[str, pd.DataFrame],
+    engine: AnalyticsEngine | None = None,
+) -> WorkflowState:
+    del engine
+    state.add_route("build_manifest")
+    table_summary_map = _summarize_table_metadata(state.table_metadata)
+    table_summaries = [
+        {"table_name": table_name, **summary}
+        for table_name, summary in table_summary_map.items()
+        if isinstance(summary, dict)
+    ]
+    reviewer = state.intermediate_results.get("reviewer", {})
+    reviewer_dict = reviewer if isinstance(reviewer, dict) else {}
+    manifest = RunManifest(
+        manifest_version="1.0",
+        project_version=__version__,
+        run_id=state.trace_id,
+        created_at=state.created_at,
+        data_source_type=state.data_source_type,
+        source_summary={
+            "data_source_type": state.data_source_type,
+            "table_count": len(tables),
+            "table_names": sorted(tables),
+        },
+        table_summaries=table_summaries,
+        dataset_fingerprints={name: fingerprint_dataframe(df) for name, df in sorted(tables.items())},
+        question=state.user_question,
+        goal_mode=state.goal_mode,
+        goal_mode_source=state.goal_mode_source,
+        workflow_backend=str(state.intermediate_results.get("workflow_backend", WORKFLOW_BACKEND_RULE_BASED)),
+        playbook_id=state.selected_playbook_id,
+        playbook_parameters=state.playbook_parameters,
+        column_mapping=state.column_mapping,
+        route_taken=list(state.route_taken),
+        reviewer_status=str(reviewer_dict.get("status", state.reviewer_status or "PENDING")),
+        reviewer_score=int(reviewer_dict.get("score", 0) or 0),
+        caveats=list(state.caveats),
+        errors=list(state.errors),
+    )
+    state.run_manifest = manifest.to_dict()
+    state.intermediate_results["run_manifest_object"] = manifest
+    return state
+
+
+def _refresh_manifest_reviewer(state: WorkflowState) -> None:
+    reviewer = state.intermediate_results.get("reviewer", {})
+    manifest = state.intermediate_results.get("run_manifest_object")
+    if not isinstance(manifest, RunManifest) or not isinstance(reviewer, dict):
+        return
+    manifest.reviewer_status = str(reviewer.get("status", "UNKNOWN"))
+    manifest.reviewer_score = int(reviewer.get("score", 0) or 0)
+    manifest.route_taken = list(state.route_taken)
+    manifest.caveats = list(state.caveats)
+    manifest.errors = list(state.errors)
+    state.run_manifest = manifest.to_dict()
 
 
 def _route_from_plan(state: WorkflowState) -> str:
@@ -1000,6 +1161,7 @@ def _review_node(
     state.reviewer_issues = review.issues
     state.reviewer_suggestions = review.suggestions
     state.intermediate_results["reviewer"] = review.to_dict()
+    _refresh_manifest_reviewer(state)
     return state
 
 
@@ -1018,6 +1180,8 @@ def _report_node(
 def _build_trace_from_state(state: WorkflowState) -> AnalysisTrace:
     reviewer_payload = state.intermediate_results.get("reviewer", {})
     return AnalysisTrace(
+        trace_id=state.trace_id,
+        created_at=state.created_at,
         workflow_backend=str(state.intermediate_results.get("workflow_backend", WORKFLOW_BACKEND_RULE_BASED)),
         user_question=state.user_question,
         goal_mode=state.goal_mode,
@@ -1029,6 +1193,17 @@ def _build_trace_from_state(state: WorkflowState) -> AnalysisTrace:
         column_mapping=state.column_mapping,
         mapping_warnings=state.mapping_warnings,
         mapping_source=state.mapping_source,
+        selected_playbook_id=state.selected_playbook_id,
+        playbook_source=state.playbook_source,
+        playbook_parameters_summary=state.playbook_parameters,
+        chart_specs=state.chart_specs,
+        manifest_summary={
+            "run_id": state.run_manifest.get("run_id"),
+            "manifest_version": state.run_manifest.get("manifest_version"),
+            "project_version": state.run_manifest.get("project_version"),
+            "dataset_fingerprint_count": len(state.run_manifest.get("dataset_fingerprints", {})),
+        } if state.run_manifest else {},
+        playbook_result_summary=state.intermediate_results.get("playbook_result", {}),
         identified_intent=state.intent,
         selected_metrics=state.selected_metrics,
         analysis_plan=state.analysis_plan,
@@ -1073,6 +1248,19 @@ def _build_result_from_state(state: WorkflowState) -> dict[str, Any]:
         "column_mapping": state.column_mapping,
         "mapping_warnings": state.mapping_warnings,
         "mapping_source": state.mapping_source,
+        "selected_playbook": (
+            state.intermediate_results.get("selected_playbook")
+            if isinstance(state.intermediate_results.get("selected_playbook"), dict)
+            else None
+        ),
+        "playbook_source": state.playbook_source,
+        "playbook_parameters": state.playbook_parameters,
+        "playbook_result": state.intermediate_results.get("playbook_result"),
+        "result_tables": state.intermediate_results.get("result_tables", {}),
+        "chart_specs": state.chart_specs,
+        "charts": state.intermediate_results.get("charts", []),
+        "run_manifest": state.run_manifest,
+        "export_formats": state.export_formats,
     }
 
 
@@ -1106,6 +1294,8 @@ def _run_rule_based_workflow(
     data_source_type: str = "synthetic",
     table_metadata: dict[str, Any] | None = None,
     column_mapping: dict[str, Any] | None = None,
+    playbook_id: str | None = None,
+    playbook_parameters: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     state = create_initial_state(
         question,
@@ -1114,6 +1304,8 @@ def _run_rule_based_workflow(
         data_source_type=data_source_type,
         table_metadata=table_metadata,
         column_mapping=column_mapping,
+        playbook_id=playbook_id,
+        playbook_parameters=playbook_parameters,
     )
     state.intermediate_results["workflow_backend"] = workflow_backend
     if initial_caveats:
@@ -1125,7 +1317,11 @@ def _run_rule_based_workflow(
     _prepare_column_mapping_node(state, tables, engine)
     _resolve_metrics_node(state, tables, engine)
     _create_plan_node(state, tables, engine)
-    _run_routed_analysis(state, tables, engine)
+    if state.selected_playbook_id:
+        _run_playbook_node(state, tables, engine)
+    else:
+        _run_routed_analysis(state, tables, engine)
+    _build_manifest_node(state, tables, engine)
     _review_node(state, tables, engine)
     _report_node(state, tables, engine)
     return state.intermediate_results["result"]
@@ -1143,6 +1339,8 @@ def run_agent_analysis(
     data_source_type: str = "synthetic",
     table_metadata: dict[str, Any] | None = None,
     column_mapping: dict[str, Any] | None = None,
+    playbook_id: str | None = None,
+    playbook_parameters: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run the deterministic workflow over synthetic tables."""
 
@@ -1158,6 +1356,8 @@ def run_agent_analysis(
                     data_source_type=data_source_type,
                     table_metadata=table_metadata,
                     column_mapping=column_mapping,
+                    playbook_id=playbook_id,
+                    playbook_parameters=playbook_parameters,
                 )
             except Exception as exc:
                 return _run_rule_based_workflow(
@@ -1170,6 +1370,8 @@ def run_agent_analysis(
                     data_source_type=data_source_type,
                     table_metadata=table_metadata,
                     column_mapping=column_mapping,
+                    playbook_id=playbook_id,
+                    playbook_parameters=playbook_parameters,
                 )
         return _run_rule_based_workflow(
             question,
@@ -1180,6 +1382,8 @@ def run_agent_analysis(
             data_source_type=data_source_type,
             table_metadata=table_metadata,
             column_mapping=column_mapping,
+            playbook_id=playbook_id,
+            playbook_parameters=playbook_parameters,
         )
 
     return _run_rule_based_workflow(
@@ -1190,6 +1394,8 @@ def run_agent_analysis(
         data_source_type=data_source_type,
         table_metadata=table_metadata,
         column_mapping=column_mapping,
+        playbook_id=playbook_id,
+        playbook_parameters=playbook_parameters,
     )
 
 
@@ -1200,6 +1406,8 @@ __all__ = [
     "_create_plan_node",
     "_langgraph_available",
     "_load_data_source_node",
+    "_build_manifest_node",
+    "_run_playbook_node",
     "_report_node",
     "_resolve_metrics_node",
     "_review_node",

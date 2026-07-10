@@ -21,11 +21,12 @@ InsightPilot Agent 是 synthetic-data-first 的本地分析自动化工作台，
 
 ## 版本语义规则
 
-- 当前 `0.4.0` 表示 Usability, Metric Mapping UI and Documentation Polish。
+- 当前 `0.5.0` 表示 Reusable Analysis Playbooks, Visual Diagnostics and Export Bundles。
 - v0.1 是基础分析能力合并版。
 - v0.2 聚焦 WorkflowState、route_taken、AnalysisTrace、ReviewerResult、workflow_backend 和 optional LangGraph fallback。
 - v0.3 聚焦 CSV / Excel upload、database query ingestion、schema mapping、validation 和 custom data fallback。
 - v0.4 聚焦 ColumnMapping、Metric Mapping UI、custom data usability、documentation polish 和 format normalization。
+- v0.5 聚焦 AnalysisPlaybook、safe SQL templates、ChartSpec、RunManifest 和 in-memory export bundles。
 
 ## 文本文件格式规则
 
@@ -60,11 +61,40 @@ InsightPilot Agent 是 synthetic-data-first 的本地分析自动化工作台，
 - 禁止分号连接多语句。
 - database_url 在 UI/report/log 中必须 mask password。
 - 不要鼓励提交真实数据库连接信息。
+- Playbook 不允许接收可执行 SQL fragment。
+- Playbook SQL 的 table/column identifier 必须来自 TableRegistry 与 ColumnMapping allowlist。
+- 日期、阈值、Top N、分组值等 scalar 必须使用参数绑定，不得直接拼接。
+- SQL preview 只能展示占位符，不允许用户编辑后直接执行。
+
+## Analysis Playbook 维护要求
+
+- playbook 代码集中维护在 `insightpilot/playbooks/`。
+- AnalysisPlaybook 必须声明 requirements、parameters、executor、chart types 和 output sections。
+- Playbook 不得绕过 ColumnMapping validation。
+- 推荐逻辑必须 deterministic，不使用在线模型。
+- 新增 playbook 必须同步增加 tests 和中文 docs。
+- 不传 playbook_id 时必须保持 v0.4 自动工作流兼容。
+- playbook 执行失败优先返回 structured WARN/FAIL、caveats 和 errors，不得让 UI 崩溃。
+
+## ChartSpec 与 Export 维护要求
+
+- ChartSpec 必须 JSON serializable，trace 只保存 spec，不保存 Figure。
+- 空结果、缺列或绘图失败不得阻断 findings。
+- HTML 不依赖在线 CDN，Excel 和 ZIP 默认在内存生成。
+- exports 不得包含 secrets、上传源文件或数据库连接信息。
+- result CSV、HTML preview 和 Excel result sheet 必须保留行数上限。
+
+## RunManifest 维护要求
+
+- manifest 不得包含完整原始数据、DataFrame、明文密码、完整 database URL 或上传文件绝对路径。
+- dataset fingerprint 必须 deterministic，用于核对输入变化，不用于恢复原始数据。
+- config import 必须检查 manifest 主版本兼容性。
+- manifest 仅用于复现配置，不保证恢复原始输入。
 
 ## WorkflowState 维护要求
 
 - WorkflowState 定义集中维护在 `insightpilot/agents/state.py`。
-- workflow 内部节点应通过 WorkflowState 传递 user_question、goal_mode、intent、selected_metrics、analysis_plan、route_taken、caveats、errors、data_source_type、table_metadata 和 schema_warnings。
+- workflow 内部节点应通过 WorkflowState 传递 user_question、goal_mode、intent、selected_metrics、analysis_plan、route_taken、caveats、errors、data_source_type、table_metadata、schema_warnings、selected_playbook_id、playbook_parameters、chart_specs 和 run_manifest。
 - `route_taken` 必须记录实际节点路径，例如 `load_data_source`、`validate_tables`、`infer_schema`、`generic_analysis_fallback`、`review`、`generate_report`。
 - `to_dict()` 不得直接序列化完整 pandas DataFrame，只能输出安全摘要。
 
@@ -116,4 +146,4 @@ InsightPilot Agent 是 synthetic-data-first 的本地分析自动化工作台，
 
 ## 后续版本建议
 
-- v0.4：metric mapping UI、user-selected date/metric/dimension columns、SQL template hardening、report export polish。
+- v0.6：多表 playbook 编排、更多本地统计诊断、导出模板版本治理和可复核的结果依赖关系。

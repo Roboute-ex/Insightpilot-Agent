@@ -1,6 +1,6 @@
 # InsightPilot Agent 项目路线图
 
-当前代码版本为 `0.4.0`。路线图保持工程记录和学习实践口吻；所有能力继续遵守 no online LLM、no API key、no committed real data 的边界。
+当前代码版本为 `0.5.0`。路线图保持工程记录和学习实践口吻；所有能力继续遵守 no online LLM、no API key、no committed real data 的边界。
 
 ## v0.1：基础分析能力合并版
 
@@ -37,7 +37,7 @@
 - WorkflowState、AnalysisTrace、ReviewerResult 和 report 增加 data_source_type、table_metadata、schema_warnings。
 - 自定义数据缺少 demo 表结构时，使用 generic analysis fallback。
 
-## v0.4：当前完成目标
+## v0.4：Usability, Metric Mapping UI and Documentation Polish
 
 目标名称：Usability, Metric Mapping UI and Documentation Polish
 
@@ -52,10 +52,25 @@
 - custom data workflow 优先使用手动 mapping，不完整时 fallback 而不崩溃。
 - 增加文本文件格式测试，防止关键文档被单行化。
 
+## v0.5：当前完成目标
+
+目标名称：Reusable Analysis Playbooks, Visual Diagnostics and Export Bundles
+
+范围：
+
+- 增加 AnalysisPlaybook、AnalysisParameter、PlaybookRequirements 和确定性 registry。
+- 提供七个内置 playbook，并以 ColumnMapping 作为输入契约。
+- 增加 allowlist identifier、绑定参数和只读检查组成的 SQL template 层。
+- 增加 ChartSpec 和自动 Plotly visual diagnostics。
+- 增加 RunManifest 与 deterministic dataset fingerprint。
+- 增加 Markdown、离线 HTML、Excel、Manifest JSON 和 ZIP Bundle。
+- Streamlit 增加 playbook、参数 form、结果 tabs 和内存下载。
+- CLI 增加 playbook、参数、config 和 export 参数，保留旧命令。
+- rule-based workflow 继续作为默认，LangGraph 继续保持 optional fallback。
+
 ## next
 
-- metric mapping UI 继续打磨。
-- user-selected SQL templates。
-- report export polish。
-- 更细的 custom data workflow trace 可视化。
-- 更强的 SQL template hardening。
+- 多表 playbook 编排和结果依赖管理。
+- 更多确定性统计诊断与数据质量规则。
+- 可配置但仍受 allowlist 约束的本地 SQL template catalog。
+- 导出模板版本治理和更细的大小限制提示。

@@ -13,9 +13,11 @@ import pandas as pd
 from insightpilot.agents.state import WorkflowState, create_initial_state
 from insightpilot.agents.workflow import (
     WORKFLOW_BACKEND_LANGGRAPH,
+    _build_manifest_node,
     _build_result_from_state,
     _create_plan_node,
     _load_data_source_node,
+    _prepare_column_mapping_node,
     _report_node,
     _resolve_metrics_node,
     _review_node,
@@ -27,6 +29,7 @@ from insightpilot.agents.workflow import (
     _run_live_quality_node,
     _run_metric_diagnosis_node,
     _run_periodic_report_node,
+    _run_playbook_node,
     _safe_engine,
 )
 
@@ -47,6 +50,12 @@ class GraphState(TypedDict, total=False):
     column_mapping: dict[str, Any]
     mapping_warnings: list[str]
     mapping_source: str
+    selected_playbook_id: str | None
+    playbook_source: str
+    playbook_parameters: dict[str, Any]
+    chart_specs: list[dict[str, Any]]
+    run_manifest: dict[str, Any]
+    export_formats: list[str]
     reviewer_status: str
     reviewer_issues: list[str]
     reviewer_suggestions: list[str]
@@ -67,6 +76,8 @@ def run_langgraph_workflow(
     data_source_type: str = "synthetic",
     table_metadata: dict[str, Any] | None = None,
     column_mapping: dict[str, Any] | None = None,
+    playbook_id: str | None = None,
+    playbook_parameters: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run the optional LangGraph graph and return the standard workflow result."""
 
@@ -81,12 +92,13 @@ def run_langgraph_workflow(
         def wrapped(values: GraphState) -> GraphState:
             state = _state(values)
             fn(state, tables, engine)
-            return state.to_dict()
+            return dict(state.__dict__)
 
         return wrapped
 
     def route(values: GraphState) -> str:
-        return _route_from_plan(_state(values))
+        current = _state(values)
+        return "playbook" if current.selected_playbook_id else _route_from_plan(current)
 
     initial_state = create_initial_state(
         question,
@@ -95,12 +107,15 @@ def run_langgraph_workflow(
         data_source_type=data_source_type,
         table_metadata=table_metadata,
         column_mapping=column_mapping,
+        playbook_id=playbook_id,
+        playbook_parameters=playbook_parameters,
     )
     initial_state.intermediate_results["workflow_backend"] = WORKFLOW_BACKEND_LANGGRAPH
 
     try:
         graph = StateGraph(GraphState)
         graph.add_node("load_data_source", node(_load_data_source_node))
+        graph.add_node("prepare_column_mapping", node(_prepare_column_mapping_node))
         graph.add_node("resolve_metrics", node(_resolve_metrics_node))
         graph.add_node("create_plan", node(_create_plan_node))
         graph.add_node("metric_diagnosis", node(_run_metric_diagnosis_node))
@@ -110,11 +125,14 @@ def run_langgraph_workflow(
         graph.add_node("live_quality", node(_run_live_quality_node))
         graph.add_node("causal_exploration", node(_run_causal_exploration_node))
         graph.add_node("periodic_report", node(_run_periodic_report_node))
+        graph.add_node("playbook", node(_run_playbook_node))
+        graph.add_node("build_manifest", node(_build_manifest_node))
         graph.add_node("review", node(_review_node))
         graph.add_node("report", node(_report_node))
 
         graph.add_edge(START, "load_data_source")
-        graph.add_edge("load_data_source", "resolve_metrics")
+        graph.add_edge("load_data_source", "prepare_column_mapping")
+        graph.add_edge("prepare_column_mapping", "resolve_metrics")
         graph.add_edge("resolve_metrics", "create_plan")
         graph.add_conditional_edges(
             "create_plan",
@@ -127,6 +145,7 @@ def run_langgraph_workflow(
                 "live_quality": "live_quality",
                 "causal_exploration": "causal_exploration",
                 "periodic_report": "periodic_report",
+                "playbook": "playbook",
             },
         )
         for route_node in [
@@ -137,8 +156,10 @@ def run_langgraph_workflow(
             "live_quality",
             "causal_exploration",
             "periodic_report",
+            "playbook",
         ]:
-            graph.add_edge(route_node, "review")
+            graph.add_edge(route_node, "build_manifest")
+        graph.add_edge("build_manifest", "review")
         graph.add_edge("review", "report")
         graph.add_edge("report", END)
 

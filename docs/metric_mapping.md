@@ -1,6 +1,6 @@
 # Metric / Column Mapping
 
-v0.4 增加 Metric / Column Mapping，用于让用户在自定义数据中手动指定关键字段。它解决的问题是：上传文件或数据库查询结果往往没有固定字段名，单靠 dtype 和列名推断不够稳定。
+v0.4 增加 Metric / Column Mapping，用于让用户在自定义数据中手动指定关键字段。v0.5 继续把 ColumnMapping 作为 Analysis Playbook 的统一输入契约。
 
 ## 自动推断 vs 手动选择
 
@@ -57,3 +57,11 @@ v0.4 增加 Metric / Column Mapping，用于让用户在自定义数据中手动
 如果 experiment_analysis 没有 group_column，系统会说明无法执行实验比较。
 
 如果 causal_exploration 没有 treatment/outcome，系统会说明只输出 caveat，不执行轻量因果估计。
+
+## 与 Analysis Playbook 的关系
+
+每个 playbook 通过 `PlaybookRequirements` 声明所需字段角色。`metric_trend` 需要 date + metric，`dimension_contribution` 需要 metric + dimension，`experiment_comparison` 需要 group + metric，`causal_exploration` 需要 treatment + outcome。
+
+playbook 不能绕过 ColumnMapping validation。无效列会被移除并写入 warning；requirements 不满足时不生成查询。
+
+手动 mapping 继续优先于自动建议。RunManifest 会保存最终 mapping 和 mapping source，但不保存完整 DataFrame。

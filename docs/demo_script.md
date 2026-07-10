@@ -137,3 +137,42 @@ CLI 示例：
 - content 场景包含 p_value、sample_size 和 reviewer 实验检查。
 - live 场景包含体验质量指标和维度归因。
 - 两个场景继续使用 synthetic data，不受 v0.3 ingestion 影响。
+
+## Demo 6：Analysis Playbook 与 Visual Diagnostics
+
+命令：
+
+```powershell
+.\.venv\Scripts\python.exe examples/run_demo.py --scenario transaction --playbook metric_trend --time-grain week --rolling-window 4
+```
+
+预期输出：
+
+- selected playbook 为 `metric_trend`。
+- route 包含 mapping validation、安全查询、playbook execution、chart generation 和 manifest。
+- Streamlit 的 Visual Diagnostics tab 展示趋势与滚动均值。
+- Reviewer 检查 playbook requirements、参数、查询安全和 manifest。
+
+## Demo 7：Export Bundle
+
+命令：
+
+```powershell
+.\.venv\Scripts\python.exe examples/run_demo.py --scenario transaction --playbook periodic_summary --export-format markdown,html,excel,manifest,bundle
+```
+
+预期输出：
+
+- CLI 输出 playbook、run_id、backend、reviewer score 和导出路径。
+- ZIP 包含 report、Excel、manifest 和有限行数的分析结果 CSV。
+- bundle 不包含 synthetic 源表文件、上传文件或数据库连接信息。
+- 已存在文件不会被静默覆盖，会追加短 run ID。
+
+## Streamlit v0.5 流程
+
+1. 选择数据来源并预览表。
+2. 对 custom data 配置 Column Mapping。
+3. 选择 goal mode 与 playbook。
+4. 在 form 中配置 playbook 参数并运行。
+5. 查看 Summary、Result Tables、Visual Diagnostics、Reviewer、Trace。
+6. 在 Export tab 准备内存导出并下载所需格式。

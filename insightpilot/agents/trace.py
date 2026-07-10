@@ -31,13 +31,20 @@ def _json_safe(value: Any) -> Any:
 
 def _normalize_query_record(record: Any) -> dict[str, Any]:
     if isinstance(record, dict):
-        return {
+        normalized = {
             "tool": str(record.get("tool", "unknown")),
             "purpose": str(record.get("purpose", "")),
             "query": str(record.get("query", "")),
             "row_count": int(record.get("row_count", 0) or 0),
             "status": str(record.get("status", "success")),
         }
+        if record.get("template_id"):
+            normalized["template_id"] = str(record["template_id"])
+        if record.get("referenced_tables"):
+            normalized["referenced_tables"] = list(record["referenced_tables"])
+        if record.get("referenced_columns"):
+            normalized["referenced_columns"] = list(record["referenced_columns"])
+        return normalized
     return {
         "tool": "legacy",
         "purpose": "legacy_query_record",
@@ -65,6 +72,12 @@ class AnalysisTrace:
     column_mapping: dict[str, Any] = field(default_factory=dict)
     mapping_warnings: list[str] = field(default_factory=list)
     mapping_source: str = "none"
+    selected_playbook_id: str | None = None
+    playbook_source: str = "none"
+    playbook_parameters_summary: dict[str, Any] = field(default_factory=dict)
+    chart_specs: list[dict[str, Any]] = field(default_factory=list)
+    manifest_summary: dict[str, Any] = field(default_factory=dict)
+    playbook_result_summary: dict[str, Any] = field(default_factory=dict)
     executed_queries: list[Any] = field(default_factory=list)
     route_taken: list[str] = field(default_factory=list)
     generated_findings: list[str] = field(default_factory=list)

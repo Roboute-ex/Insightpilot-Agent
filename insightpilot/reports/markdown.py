@@ -76,6 +76,59 @@ def _source_label(goal_mode_source: str) -> str:
     return goal_mode_source or "自动识别"
 
 
+def _playbook_lines(result: dict[str, object]) -> str:
+    selected = result.get("selected_playbook")
+    if not isinstance(selected, dict) or not selected:
+        return "- 未选择 playbook；本次保留 v0.4 自动工作流。"
+    playbook_result = result.get("playbook_result")
+    result_dict = playbook_result if isinstance(playbook_result, dict) else {}
+    metadata = result_dict.get("metadata") if isinstance(result_dict.get("metadata"), dict) else {}
+    parameters = result.get("playbook_parameters") if isinstance(result.get("playbook_parameters"), dict) else {}
+    lines = [
+        f"- playbook_id: {selected.get('playbook_id')}",
+        f"- 中文名称: {selected.get('display_name')}",
+        f"- playbook_source: {result.get('playbook_source', 'none')}",
+        f"- status: {result_dict.get('status', 'N/A')}",
+        f"- requirements_satisfied: {metadata.get('requirements_satisfied', 'N/A')}",
+        "- parameters:",
+    ]
+    lines.extend(f"- {key}: {value}" for key, value in parameters.items())
+    return "\n".join(lines)
+
+
+def _visual_lines(result: dict[str, object]) -> str:
+    specs = result.get("chart_specs")
+    if not isinstance(specs, list) or not specs:
+        return "- 暂无可用图表规格。"
+    lines: list[str] = []
+    for spec in specs:
+        if not isinstance(spec, dict):
+            continue
+        lines.append(
+            f"- {spec.get('title')}: type={spec.get('chart_type')}, "
+            f"table={spec.get('table_key')}, description={spec.get('description', '')}"
+        )
+    return "\n".join(lines) or "- 暂无可用图表规格。"
+
+
+def _manifest_lines(result: dict[str, object]) -> str:
+    manifest = result.get("run_manifest")
+    if not isinstance(manifest, dict) or not manifest:
+        return "- 暂无 RunManifest。"
+    fingerprints = manifest.get("dataset_fingerprints", {})
+    fingerprint_count = len(fingerprints) if isinstance(fingerprints, dict) else 0
+    return "\n".join(
+        [
+            f"- run_id: {manifest.get('run_id')}",
+            f"- project_version: {manifest.get('project_version')}",
+            f"- dataset_fingerprint_count: {fingerprint_count}",
+            f"- workflow_backend: {manifest.get('workflow_backend')}",
+            f"- route_taken: {' -> '.join(_as_list(manifest.get('route_taken')))}",
+            f"- reviewer_score: {manifest.get('reviewer_score')}",
+        ]
+    )
+
+
 def generate_markdown_report(result: dict[str, object]) -> str:
     """Generate a structured v0.2 markdown report from a workflow result."""
 
@@ -195,6 +248,22 @@ def generate_markdown_report(result: dict[str, object]) -> str:
             "",
             "## 15. 下一步建议",
             next_step_lines,
+            "",
+            "## Analysis Playbook",
+            _playbook_lines(result),
+            "",
+            "## Visual Diagnostics",
+            _visual_lines(result),
+            "",
+            "## Run Manifest",
+            _manifest_lines(result),
+            "",
+            "## Available Exports",
+            (
+                "- Markdown\n- Interactive HTML\n- Excel\n- Manifest JSON\n- ZIP Bundle"
+                if isinstance(result.get("selected_playbook"), dict)
+                else "- 选择 Analysis Playbook 后可按需生成完整导出格式。"
+            ),
             "",
         ]
     )
