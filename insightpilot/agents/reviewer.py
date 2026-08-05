@@ -45,6 +45,16 @@ def _combined_text(trace: AnalysisTrace) -> str:
         str(trace.chart_specs),
         str(trace.manifest_summary),
         str(trace.playbook_result_summary),
+        str(trace.semantic_model_summary),
+        str(trace.metric_request),
+        str(trace.join_plan_summary),
+        str(trace.query_plan_summary),
+        str(trace.plan_review),
+        str(trace.contract_summary),
+        str(trace.lineage_summary),
+        str(trace.observability_summary),
+        str(trace.evaluation_summary),
+        str(trace.analysis_result_summary),
         str(trace.reviewer_checks),
         " ".join(trace.errors),
     ]
@@ -52,7 +62,7 @@ def _combined_text(trace: AnalysisTrace) -> str:
 
 
 def _has_synthetic_disclaimer(text: str) -> bool:
-    return any(term in text for term in ("synthetic data", "合成", "限制", "不代表真实", "仅用于学习"))
+    return any(term in text for term in ("synthetic data", "合成", "模拟数据", "限制", "不代表真实", "仅用于学习"))
 
 
 def _has_causal_caveat(text: str) -> bool:
@@ -67,6 +77,9 @@ def review_analysis(trace: AnalysisTrace) -> ReviewerResult:
     playbook_result = trace.playbook_result_summary if isinstance(trace.playbook_result_summary, dict) else {}
     playbook_metadata = playbook_result.get("metadata", {}) if isinstance(playbook_result.get("metadata"), dict) else {}
     result_table_summaries = playbook_result.get("result_tables", {}) if isinstance(playbook_result.get("result_tables"), dict) else {}
+    semantic_selected = trace.selected_playbook_id == "semantic_metric_query"
+    plan_execution_mode = str(trace.metric_request.get("execution_mode", "execute"))
+    review_decision = str(trace.plan_review.get("decision", ""))
     unsafe_sql_pattern = re.compile(r"\b(drop|delete|insert|update|alter|create|truncate|merge|replace|attach|copy)\b", re.IGNORECASE)
     credential_pattern = re.compile(r"://[^:/@\s]+:[^*@/\s]+@")
     checks: dict[str, bool] = {
@@ -119,6 +132,18 @@ def review_analysis(trace: AnalysisTrace) -> ReviewerResult:
         "export_limitations_reported": not playbook_selected or any(
             term in text for term in ("不代表真实", "内存", "限制", "caveat", "不包含", "原始数据")
         ),
+        "semantic_plan_valid": not semantic_selected or bool(
+            trace.semantic_model_summary.get("model_id")
+            and trace.query_plan_summary.get("plan_id")
+            and trace.join_plan_summary.get("plan_id")
+        ),
+        "join_risk_reviewed": not semantic_selected
+        or not trace.query_plan_summary.get("requires_approval")
+        or review_decision == "approved"
+        or (plan_execution_mode == "plan_only" and review_decision == "pending"),
+        "contract_checks_available": not semantic_selected or bool(trace.contract_summary.get("check_count")),
+        "lineage_generated": not semantic_selected or bool(trace.lineage_summary.get("lineage_fingerprint")),
+        "observability_generated": not semantic_selected or bool(trace.observability_summary.get("span_count")),
     }
     if trace.mapping_warnings and "mapping" not in text and "字段" not in text:
         checks["mapping_warnings_reported"] = False
@@ -228,6 +253,26 @@ def review_analysis(trace: AnalysisTrace) -> ReviewerResult:
             "缺少导出与复现边界说明。",
             "说明导出不含原始数据或凭据，manifest 仅用于复现配置。",
         ),
+        "semantic_plan_valid": (
+            "语义查询缺少完整的模型、连接或查询计划。",
+            "重新加载语义模型并生成稳定 JoinPlan 与 QueryPlan。",
+        ),
+        "join_risk_reviewed": (
+            "高风险 Join 尚未获得与当前计划编号匹配的审批。",
+            "复核 fanout 与输出粒度后，明确批准当前只读查询计划。",
+        ),
+        "contract_checks_available": (
+            "语义查询缺少数据契约检查。",
+            "在执行前检查主键、必填字段、行数与指标范围。",
+        ),
+        "lineage_generated": (
+            "语义查询缺少数据血缘。",
+            "记录输入表、查询操作与输出结果之间的派生关系。",
+        ),
+        "observability_generated": (
+            "语义查询缺少本地运行摘要。",
+            "记录本地 span、查询次数、警告与错误数量。",
+        ),
     }
 
     for check_name, passed in checks.items():
@@ -282,6 +327,11 @@ def review_analysis(trace: AnalysisTrace) -> ReviewerResult:
         "result_tables_available": 20,
         "export_contains_no_raw_credentials": 35,
         "export_limitations_reported": 8,
+        "semantic_plan_valid": 30,
+        "join_risk_reviewed": 35,
+        "contract_checks_available": 12,
+        "lineage_generated": 12,
+        "observability_generated": 8,
     }
     for check_name, passed in checks.items():
         if not passed:

@@ -41,6 +41,7 @@ def test_cli_csv_ingestion() -> None:
         "uploaded_table",
         "--goal-mode",
         "growth_trend",
+        "--verbose",
     )
     assert result.returncode == 0, result.stderr
     assert "scenario=file" in result.stdout
@@ -65,6 +66,7 @@ def test_cli_excel_ingestion() -> None:
         "uploaded_table",
         "--goal-mode",
         "growth_trend",
+        "--verbose",
     )
     assert result.returncode == 0, result.stderr
     assert "scenario=file" in result.stdout
@@ -90,6 +92,7 @@ def test_cli_sqlite_ingestion() -> None:
         "db_table",
         "--goal-mode",
         "growth_trend",
+        "--verbose",
     )
     assert result.returncode == 0, result.stderr
     assert "scenario=database" in result.stdout

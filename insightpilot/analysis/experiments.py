@@ -27,8 +27,8 @@ def _conclusion(p_value: float, sample_size: dict[str, int]) -> str:
     if min(sample_size.values()) < 30:
         return "样本量偏小，结果仅适合继续观察，不应放大结论。"
     if p_value < 0.05:
-        return "p_value < 0.05，合成实验中存在统计显著差异；仍需结合长期稳定性继续观察。"
-    return "p_value >= 0.05，当前合成样本未显示统计显著差异，建议继续观察或扩大样本。"
+        return "p-value < 0.05，内置模拟实验中存在统计显著差异；仍需结合长期稳定性继续观察。"
+    return "p-value >= 0.05，当前模拟样本未显示统计显著差异，建议继续观察或扩大样本。"
 
 
 def analyze_ab_test(

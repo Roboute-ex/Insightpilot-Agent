@@ -14,10 +14,14 @@ from insightpilot.agents.state import WorkflowState, create_initial_state
 from insightpilot.agents.workflow import (
     WORKFLOW_BACKEND_LANGGRAPH,
     _build_manifest_node,
+    _build_analysis_results_node,
+    _build_governance_node,
+    _build_observability_node,
     _build_result_from_state,
     _create_plan_node,
     _load_data_source_node,
     _prepare_column_mapping_node,
+    _preview_analysis_plan_node,
     _report_node,
     _resolve_metrics_node,
     _review_node,
@@ -56,6 +60,19 @@ class GraphState(TypedDict, total=False):
     chart_specs: list[dict[str, Any]]
     run_manifest: dict[str, Any]
     export_formats: list[str]
+    semantic_model: dict[str, Any]
+    semantic_catalog: dict[str, Any]
+    metric_request: dict[str, Any]
+    relationship_graph: dict[str, Any]
+    join_plan: dict[str, Any]
+    query_plan: dict[str, Any]
+    plan_review: dict[str, Any]
+    execution_mode: str
+    contract_results: list[dict[str, Any]]
+    lineage: dict[str, Any]
+    telemetry: dict[str, Any]
+    evaluation_summary: dict[str, Any]
+    analysis_result_package: dict[str, Any]
     reviewer_status: str
     reviewer_issues: list[str]
     reviewer_suggestions: list[str]
@@ -78,6 +95,7 @@ def run_langgraph_workflow(
     column_mapping: dict[str, Any] | None = None,
     playbook_id: str | None = None,
     playbook_parameters: dict[str, Any] | None = None,
+    execution_mode: str = "execute",
 ) -> dict[str, Any]:
     """Run the optional LangGraph graph and return the standard workflow result."""
 
@@ -98,6 +116,8 @@ def run_langgraph_workflow(
 
     def route(values: GraphState) -> str:
         current = _state(values)
+        if current.execution_mode == "plan_only" and current.selected_playbook_id != "semantic_metric_query":
+            return "plan_preview"
         return "playbook" if current.selected_playbook_id else _route_from_plan(current)
 
     initial_state = create_initial_state(
@@ -109,6 +129,7 @@ def run_langgraph_workflow(
         column_mapping=column_mapping,
         playbook_id=playbook_id,
         playbook_parameters=playbook_parameters,
+        execution_mode=execution_mode,
     )
     initial_state.intermediate_results["workflow_backend"] = WORKFLOW_BACKEND_LANGGRAPH
 
@@ -126,6 +147,10 @@ def run_langgraph_workflow(
         graph.add_node("causal_exploration", node(_run_causal_exploration_node))
         graph.add_node("periodic_report", node(_run_periodic_report_node))
         graph.add_node("playbook", node(_run_playbook_node))
+        graph.add_node("plan_preview", node(_preview_analysis_plan_node))
+        graph.add_node("build_analysis_results", node(_build_analysis_results_node))
+        graph.add_node("governance", node(_build_governance_node))
+        graph.add_node("observability", node(_build_observability_node))
         graph.add_node("build_manifest", node(_build_manifest_node))
         graph.add_node("review", node(_review_node))
         graph.add_node("report", node(_report_node))
@@ -146,6 +171,7 @@ def run_langgraph_workflow(
                 "causal_exploration": "causal_exploration",
                 "periodic_report": "periodic_report",
                 "playbook": "playbook",
+                "plan_preview": "plan_preview",
             },
         )
         for route_node in [
@@ -157,8 +183,12 @@ def run_langgraph_workflow(
             "causal_exploration",
             "periodic_report",
             "playbook",
+            "plan_preview",
         ]:
-            graph.add_edge(route_node, "build_manifest")
+            graph.add_edge(route_node, "build_analysis_results")
+        graph.add_edge("build_analysis_results", "governance")
+        graph.add_edge("governance", "observability")
+        graph.add_edge("observability", "build_manifest")
         graph.add_edge("build_manifest", "review")
         graph.add_edge("review", "report")
         graph.add_edge("report", END)

@@ -24,3 +24,5 @@ reports/*.zip
 reports/*.csv
 !reports/__init__.py
 .tmp_tests/
+
+reports/

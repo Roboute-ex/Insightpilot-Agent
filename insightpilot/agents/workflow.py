@@ -11,9 +11,12 @@ from insightpilot.analysis.anomaly import detect_metric_anomaly
 from insightpilot.analysis.attribution import dimension_contribution
 from insightpilot.analysis.causal_light import estimate_adjusted_effect
 from insightpilot.analysis.experiments import analyze_ab_test
+from insightpilot.analysis.package_builder import build_analysis_result_package, deduplicate_findings, findings_from_package
+from insightpilot.analysis.results import AnalysisResultPackage
 from insightpilot.agents.reviewer import review_analysis
 from insightpilot.agents.state import WorkflowState, create_initial_state
 from insightpilot.agents.trace import AnalysisTrace
+from insightpilot.contracts import ColumnContract, TableContract, validate_contracts
 from insightpilot.config import REPORT_LIMITATION
 from insightpilot._version import __version__
 from insightpilot.ingestion.mapping import (
@@ -26,11 +29,15 @@ from insightpilot.ingestion.schema_mapper import infer_schema_mapping
 from insightpilot.ingestion.validation import validate_tables_for_workflow
 from insightpilot.metrics.dictionary import MetricDefinition
 from insightpilot.metrics.resolver import resolve_metrics_from_question
+from insightpilot.lineage import DatasetNode, LineageEdge, LineageGraph, OperationNode
+from insightpilot.observability import LocalTracer
 from insightpilot.planning.planner import AnalysisPlan, create_analysis_plan
 from insightpilot.playbooks.executor import execute_playbook
 from insightpilot.playbooks.registry import get_playbook_registry
 from insightpilot.reports.manifest import RunManifest, fingerprint_dataframe, sanitize_manifest_value
 from insightpilot.reports.markdown import generate_markdown_report
+from insightpilot.semantic.catalog import load_builtin_catalog
+from insightpilot.semantic.relationships import RelationshipGraph
 from insightpilot.tools.duckdb_engine import AnalyticsEngine
 from insightpilot.visualization.factory import build_charts
 
@@ -40,9 +47,9 @@ WORKFLOW_BACKEND_LANGGRAPH = "langgraph"
 WORKFLOW_BACKEND_LANGGRAPH_FALLBACK = "langgraph_unavailable_fallback"
 
 DEFAULT_CAVEATS = [
-    "本次分析仅使用 synthetic data，用于学习研究和工作流演示，不代表真实业务结论。",
+    "本次分析仅使用内置模拟数据，用于学习研究和工作流演示，不代表真实业务结论。",
     "相关性不能直接解释为因果关系；实验和轻量调整结果仍需谨慎解读。",
-    "rule-based planner 依赖 deterministic keyword rules，复杂表达需要继续扩展规则覆盖。",
+    "当前分析计划由确定性规则生成。对于表达复杂或口径不明确的问题，建议手动选择分析目标、指标和字段映射。",
 ]
 
 CUSTOM_DATA_CAVEATS = [
@@ -440,6 +447,13 @@ def _run_playbook_node(
         return state
 
     state.add_route("build_safe_query")
+    metadata = execution.metadata if isinstance(execution.metadata, dict) else {}
+    if metadata.get("multi_table"):
+        state.add_route("load_semantic_model") if metadata.get("semantic_model") else None
+        state.add_route("build_relationship_graph") if metadata.get("semantic_model") else None
+        state.add_route("plan_joins") if metadata.get("join_plan") else None
+        state.add_route("compile_metric_query") if metadata.get("query_plan") else None
+        state.add_route("review_query_plan") if metadata.get("plan_review") else None
     state.add_route("execute_playbook")
     state.executed_queries.extend(execution.executed_queries)
     for query_record in execution.executed_queries:
@@ -450,6 +464,19 @@ def _run_playbook_node(
             )
     state.playbook_parameters = dict(execution.parameters)
     state.chart_specs = list(execution.chart_specs)
+    if metadata.get("semantic_model"):
+        state.semantic_model = dict(metadata["semantic_model"])
+        state.semantic_catalog = {"fingerprint": metadata.get("catalog_fingerprint")}
+        state.metric_request = dict(metadata.get("metric_request") or {})
+        state.join_plan = dict(metadata.get("join_plan") or {})
+        state.query_plan = dict(metadata.get("query_plan") or {})
+        state.plan_review = dict(metadata.get("plan_review") or {})
+        state.execution_mode = str(state.metric_request.get("execution_mode") or state.execution_mode)
+        requested_metrics = state.metric_request.get("metrics", [])
+        if isinstance(requested_metrics, list):
+            state.selected_metrics = [str(item) for item in requested_metrics]
+        if execution.result_tables:
+            state.add_route("execute_query_plan")
     mapping = execution.metadata.get("column_mapping", {})
     if isinstance(mapping, dict) and mapping:
         state.column_mapping = mapping
@@ -479,6 +506,122 @@ def _run_playbook_node(
     state.intermediate_results["chart_pairs"] = chart_pairs
     state.intermediate_results["charts"] = [figure for _, figure in chart_pairs]
     return state
+
+
+def _build_governance_node(
+    state: WorkflowState,
+    tables: dict[str, pd.DataFrame],
+    engine: AnalyticsEngine | None = None,
+) -> WorkflowState:
+    """Build contracts and lineage for semantic runs without affecting legacy routes."""
+
+    del engine
+    if not state.semantic_model:
+        return state
+    model_id = str(state.semantic_model.get("model_id") or "commerce_demo")
+    try:
+        model = load_builtin_catalog().get(model_id)
+    except ValueError as exc:
+        state.errors.append(str(exc))
+        return state
+    state.add_route("check_data_contracts")
+    contracts: list[TableContract] = []
+    for entity in model.entities.values():
+        if entity.table_name not in tables:
+            continue
+        contracts.append(
+            TableContract(
+                table_name=entity.table_name,
+                minimum_rows=1,
+                unique_key=[entity.primary_key],
+                columns=[ColumnContract(entity.primary_key, nullable=False, unique=True)],
+            )
+        )
+    checks = validate_contracts(tables, contracts)
+    state.contract_results = [item.to_dict() for item in checks]
+    state.relationship_graph = RelationshipGraph(model).to_dict()
+
+    state.add_route("build_lineage")
+    lineage = LineageGraph()
+    required_entities = state.query_plan.get("required_entities", []) if state.query_plan else []
+    table_names = [model.entities[item].table_name for item in required_entities if item in model.entities]
+    if not table_names:
+        selected = state.intermediate_results.get("selected_playbook", {})
+        requirements = selected.get("requirements", {}) if isinstance(selected, dict) else {}
+        table_names = [name for name in requirements.get("required_tables", []) if name in tables]
+    for table_name in sorted(set(table_names)):
+        frame = tables[table_name]
+        lineage.add_dataset(
+            DatasetNode(
+                f"input_{table_name}",
+                table_name,
+                "input",
+                fingerprint_dataframe(frame),
+                int(len(frame)),
+                [str(column) for column in frame.columns],
+            )
+        )
+    operation_id = f"operation_{state.query_plan.get('plan_id') or state.selected_playbook_id}"
+    lineage.add_operation(
+        OperationNode(
+            operation_id,
+            "semantic_query" if state.query_plan else "multi_table_playbook",
+            "执行语义指标查询" if state.query_plan else "执行多表分析剧本",
+            str(state.query_plan.get("plan_id") or ""),
+            {"playbook_id": state.selected_playbook_id},
+        )
+    )
+    for table_name in sorted(set(table_names)):
+        lineage.add_edge(LineageEdge(f"input_{table_name}", operation_id, "input_to_operation"))
+    result_tables = state.intermediate_results.get("result_tables", {})
+    if isinstance(result_tables, dict):
+        for name, frame in sorted(result_tables.items()):
+            if not isinstance(frame, pd.DataFrame):
+                continue
+            output_id = f"output_{name}"
+            lineage.add_dataset(
+                DatasetNode(
+                    output_id,
+                    name,
+                    "output",
+                    fingerprint_dataframe(frame),
+                    int(len(frame)),
+                    [str(column) for column in frame.columns],
+                )
+            )
+            lineage.add_edge(LineageEdge(operation_id, output_id, "operation_to_output"))
+    state.lineage = {**lineage.to_dict(), "dot": lineage.to_dot()}
+    return state
+
+
+def _set_observability(state: WorkflowState, tracer: LocalTracer) -> WorkflowState:
+    state.add_route("summarize_observability")
+    join_risk_count = sum(
+        1
+        for step in state.join_plan.get("steps", [])
+        if isinstance(step, dict) and step.get("risk_level") != "safe"
+    )
+    summary = tracer.summary(
+        query_count=len(state.executed_queries),
+        warning_count=len(state.schema_warnings) + len(state.mapping_warnings),
+        error_count=len(state.errors),
+        join_risk_count=join_risk_count,
+    )
+    state.telemetry = {**tracer.to_dict(), "summary": summary.to_dict()}
+    return state
+
+
+def _build_observability_node(
+    state: WorkflowState,
+    tables: dict[str, pd.DataFrame],
+    engine: AnalyticsEngine | None = None,
+) -> WorkflowState:
+    del tables, engine
+    tracer = LocalTracer(state.trace_id)
+    for route_step in state.route_taken:
+        with tracer.span(route_step):
+            pass
+    return _set_observability(state, tracer)
 
 
 def _build_manifest_node(
@@ -521,6 +664,25 @@ def _build_manifest_node(
         reviewer_score=int(reviewer_dict.get("score", 0) or 0),
         caveats=list(state.caveats),
         errors=list(state.errors),
+        semantic_model_id=str(state.semantic_model.get("model_id")) if state.semantic_model else None,
+        catalog_fingerprint=str(state.semantic_catalog.get("fingerprint")) if state.semantic_catalog.get("fingerprint") else None,
+        metric_request=state.metric_request,
+        query_plan_id=str(state.query_plan.get("plan_id")) if state.query_plan else None,
+        join_plan_id=str(state.join_plan.get("plan_id")) if state.join_plan else None,
+        plan_review=state.plan_review,
+        contract_summary={
+            "check_count": len(state.contract_results),
+            "failed_count": sum(item.get("status") == "FAIL" for item in state.contract_results),
+            "warning_count": sum(item.get("status") == "WARN" for item in state.contract_results),
+        },
+        lineage_summary={
+            "dataset_count": len(state.lineage.get("datasets", [])),
+            "operation_count": len(state.lineage.get("operations", [])),
+            "edge_count": len(state.lineage.get("edges", [])),
+            "lineage_fingerprint": state.lineage.get("lineage_fingerprint"),
+        },
+        telemetry_summary=state.telemetry.get("summary", {}),
+        evaluation_summary=state.evaluation_summary,
     )
     state.run_manifest = manifest.to_dict()
     state.intermediate_results["run_manifest_object"] = manifest
@@ -698,14 +860,14 @@ def _run_experiment_node(
     sample_size = ab_result["sample_size"]
     findings = [
         (
-            f"实验组 completion_rate={float(ab_result['treatment_mean']):.4f}，对照组 "
-            f"{float(ab_result['control_mean']):.4f}，相对提升 {float(ab_result['relative_lift']):.2%}。"
+            f"实验组完播率为 {float(ab_result['treatment_mean']):.2%}，对照组为 "
+            f"{float(ab_result['control_mean']):.2%}，相对 lift 为 {float(ab_result['relative_lift']):.2%}。"
         ),
-        f"sample_size={sample_size}，用于判断当前 synthetic 实验样本是否足够稳定。",
-        f"p_value={float(ab_result['p_value']):.6f}，confidence_interval={ab_result['confidence_interval']}。",
+        f"实验样本量：对照组 {sample_size['control']:,}，实验组 {sample_size['treatment']:,}。",
+        f"显著性检验：p-value={float(ab_result['p_value']):.6f}，95% 置信区间={ab_result['confidence_interval']}。",
         (
-            f"轻量调整后 effect={float(effect['adjusted_effect']):.4f}，"
-            f"naive difference={float(effect['naive_difference']):.4f}。"
+            f"轻量调整后估计效果为 {float(effect['adjusted_effect']):.4f}，"
+            f"未调整组间差异为 {float(effect['naive_difference']):.4f}。"
         ),
         str(ab_result["conclusion"]),
         REPORT_LIMITATION,
@@ -716,7 +878,7 @@ def _run_experiment_node(
     ]
     _set_node_outputs(
         state,
-        summary="A/B 实验评估已完成，包含 p_value、sample_size 和轻量调整结果。",
+        summary="A/B 实验评估已完成，包含 p-value、样本量和轻量调整结果。",
         findings=findings,
         artifacts={
             "ab_test": ab_result,
@@ -1165,6 +1327,55 @@ def _review_node(
     return state
 
 
+def _build_analysis_results_node(
+    state: WorkflowState,
+    tables: dict[str, pd.DataFrame],
+    engine: AnalyticsEngine | None = None,
+) -> WorkflowState:
+    """Normalize routed and playbook output into one structured result contract."""
+
+    del engine
+    state.add_route("build_analysis_results")
+    if state.execution_mode == "plan_only":
+        package = AnalysisResultPackage(
+            run_id=state.trace_id,
+            scenario="plan_only",
+            question=state.user_question,
+            executive_summary="当前仅展示分析方案，尚未执行实际计算。",
+            caveats=[str(item) for item in state.caveats],
+            metadata={"execution_mode": "plan_only"},
+        )
+        state.analysis_result_package = package.to_dict_summary()
+        state.intermediate_results["summary"] = package.executive_summary
+        state.findings = [package.executive_summary]
+        return state
+    existing_findings = list(state.findings)
+    package = build_analysis_result_package(state, tables)
+    validation_issues = package.validate()
+    if validation_issues:
+        _append_unique(state.caveats, [f"结构化结果校验提示：{item}" for item in validation_issues])
+    state.analysis_result_package = package.to_dict_summary()
+    state.intermediate_results["result_tables"] = package.result_tables
+    state.intermediate_results["analysis_result_package"] = state.analysis_result_package
+    state.intermediate_results["summary"] = package.executive_summary
+    state.findings = deduplicate_findings(
+        package.executive_summary,
+        [*findings_from_package(package), *existing_findings],
+    )
+    state.intermediate_results["next_steps"] = [item.action for item in package.recommendations]
+    return state
+
+
+def _preview_analysis_plan_node(
+    state: WorkflowState,
+    tables: dict[str, pd.DataFrame],
+    engine: AnalyticsEngine | None = None,
+) -> WorkflowState:
+    del tables, engine
+    state.add_route("preview_analysis_plan")
+    return state
+
+
 def _report_node(
     state: WorkflowState,
     tables: dict[str, pd.DataFrame],
@@ -1213,6 +1424,25 @@ def _build_trace_from_state(state: WorkflowState) -> AnalysisTrace:
         caveats=state.caveats,
         reviewer_checks=reviewer_payload if isinstance(reviewer_payload, dict) else {},
         errors=state.errors,
+        semantic_model_summary=state.semantic_model,
+        metric_request=state.metric_request,
+        join_plan_summary=state.join_plan,
+        query_plan_summary=state.query_plan,
+        plan_review=state.plan_review,
+        contract_summary={
+            "check_count": len(state.contract_results),
+            "failed_count": sum(item.get("status") == "FAIL" for item in state.contract_results),
+            "warning_count": sum(item.get("status") == "WARN" for item in state.contract_results),
+        },
+        lineage_summary={
+            "dataset_count": len(state.lineage.get("datasets", [])),
+            "operation_count": len(state.lineage.get("operations", [])),
+            "edge_count": len(state.lineage.get("edges", [])),
+            "lineage_fingerprint": state.lineage.get("lineage_fingerprint"),
+        },
+        observability_summary=state.telemetry.get("summary", {}),
+        evaluation_summary=state.evaluation_summary,
+        analysis_result_summary=state.analysis_result_package,
     )
 
 
@@ -1261,6 +1491,20 @@ def _build_result_from_state(state: WorkflowState) -> dict[str, Any]:
         "charts": state.intermediate_results.get("charts", []),
         "run_manifest": state.run_manifest,
         "export_formats": state.export_formats,
+        "semantic_model": state.semantic_model,
+        "semantic_catalog": state.semantic_catalog,
+        "metric_request": state.metric_request,
+        "relationship_graph": state.relationship_graph,
+        "join_plan": state.join_plan,
+        "query_plan": state.query_plan,
+        "plan_review": state.plan_review,
+        "execution_mode": state.execution_mode,
+        "contract_results": state.contract_results,
+        "lineage": state.lineage,
+        "telemetry": state.telemetry,
+        "evaluation": state.evaluation_summary,
+        "analysis_result_package": state.analysis_result_package,
+        "workflow_state": state.to_dict(),
     }
 
 
@@ -1289,13 +1533,14 @@ def _run_rule_based_workflow(
     tables: dict[str, pd.DataFrame],
     goal_mode: str = "auto",
     workflow_backend: str = WORKFLOW_BACKEND_RULE_BASED,
-    initial_caveats: list[str] | None = None,
+    initial_caveats: list[Any] | None = None,
     initial_errors: list[str] | None = None,
     data_source_type: str = "synthetic",
     table_metadata: dict[str, Any] | None = None,
     column_mapping: dict[str, Any] | None = None,
     playbook_id: str | None = None,
     playbook_parameters: dict[str, Any] | None = None,
+    execution_mode: str = "execute",
 ) -> dict[str, Any]:
     state = create_initial_state(
         question,
@@ -1306,6 +1551,7 @@ def _run_rule_based_workflow(
         column_mapping=column_mapping,
         playbook_id=playbook_id,
         playbook_parameters=playbook_parameters,
+        execution_mode=execution_mode,
     )
     state.intermediate_results["workflow_backend"] = workflow_backend
     if initial_caveats:
@@ -1313,17 +1559,28 @@ def _run_rule_based_workflow(
     if initial_errors:
         _append_unique(state.errors, initial_errors)
     engine = _safe_engine(tables)
-    _load_data_source_node(state, tables, engine)
-    _prepare_column_mapping_node(state, tables, engine)
-    _resolve_metrics_node(state, tables, engine)
-    _create_plan_node(state, tables, engine)
-    if state.selected_playbook_id:
-        _run_playbook_node(state, tables, engine)
+    tracer = LocalTracer(state.trace_id)
+
+    def run_traced(name: str, fn: Callable[..., WorkflowState]) -> None:
+        with tracer.span(name):
+            fn(state, tables, engine)
+
+    run_traced("load_data_source", _load_data_source_node)
+    run_traced("prepare_column_mapping", _prepare_column_mapping_node)
+    run_traced("resolve_metrics", _resolve_metrics_node)
+    run_traced("create_plan", _create_plan_node)
+    if state.execution_mode == "plan_only" and state.selected_playbook_id != "semantic_metric_query":
+        state.add_route("preview_analysis_plan")
+    elif state.selected_playbook_id:
+        run_traced("run_playbook", _run_playbook_node)
     else:
-        _run_routed_analysis(state, tables, engine)
-    _build_manifest_node(state, tables, engine)
-    _review_node(state, tables, engine)
-    _report_node(state, tables, engine)
+        run_traced("run_routed_analysis", _run_routed_analysis)
+    run_traced("build_analysis_results", _build_analysis_results_node)
+    run_traced("build_governance", _build_governance_node)
+    _set_observability(state, tracer)
+    run_traced("build_manifest", _build_manifest_node)
+    run_traced("review", _review_node)
+    run_traced("generate_report", _report_node)
     return state.intermediate_results["result"]
 
 
@@ -1341,8 +1598,29 @@ def run_agent_analysis(
     column_mapping: dict[str, Any] | None = None,
     playbook_id: str | None = None,
     playbook_parameters: dict[str, Any] | None = None,
+    execution_mode: str | None = None,
+    plan_only: bool = False,
+    approved_plan_id: str | None = None,
+    semantic_model_id: str = "commerce_demo",
+    metric_request: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run the deterministic workflow over synthetic tables."""
+
+    effective_parameters = dict(playbook_parameters or {})
+    effective_execution_mode = "plan_only" if plan_only else (execution_mode or "execute")
+    if playbook_id == "semantic_metric_query":
+        request_values = dict(metric_request or {})
+        if request_values.get("metrics") and not effective_parameters.get("metric"):
+            effective_parameters["metric"] = list(request_values["metrics"])[0]
+        if request_values.get("dimensions") is not None and "dimensions" not in effective_parameters:
+            effective_parameters["dimensions"] = request_values["dimensions"]
+        for key in ["date_dimension", "date_from", "date_to", "time_grain", "limit"]:
+            if request_values.get(key) is not None and key not in effective_parameters:
+                effective_parameters[key] = request_values[key]
+        effective_parameters["semantic_model_id"] = semantic_model_id
+        effective_parameters["execution_mode"] = effective_execution_mode
+        if approved_plan_id:
+            effective_parameters["approved_plan_id"] = approved_plan_id
 
     if use_langgraph and data_source_type == "synthetic":
         if _langgraph_available():
@@ -1357,7 +1635,8 @@ def run_agent_analysis(
                     table_metadata=table_metadata,
                     column_mapping=column_mapping,
                     playbook_id=playbook_id,
-                    playbook_parameters=playbook_parameters,
+                    playbook_parameters=effective_parameters,
+                    execution_mode=effective_execution_mode,
                 )
             except Exception as exc:
                 return _run_rule_based_workflow(
@@ -1371,7 +1650,8 @@ def run_agent_analysis(
                     table_metadata=table_metadata,
                     column_mapping=column_mapping,
                     playbook_id=playbook_id,
-                    playbook_parameters=playbook_parameters,
+                    playbook_parameters=effective_parameters,
+                    execution_mode=effective_execution_mode,
                 )
         return _run_rule_based_workflow(
             question,
@@ -1383,7 +1663,8 @@ def run_agent_analysis(
             table_metadata=table_metadata,
             column_mapping=column_mapping,
             playbook_id=playbook_id,
-            playbook_parameters=playbook_parameters,
+            playbook_parameters=effective_parameters,
+            execution_mode=effective_execution_mode,
         )
 
     return _run_rule_based_workflow(
@@ -1395,7 +1676,8 @@ def run_agent_analysis(
         table_metadata=table_metadata,
         column_mapping=column_mapping,
         playbook_id=playbook_id,
-        playbook_parameters=playbook_parameters,
+        playbook_parameters=effective_parameters,
+        execution_mode=effective_execution_mode,
     )
 
 

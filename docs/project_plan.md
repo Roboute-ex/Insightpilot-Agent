@@ -1,6 +1,6 @@
 # InsightPilot Agent 项目路线图
 
-当前代码版本为 `0.5.0`。路线图保持工程记录和学习实践口吻；所有能力继续遵守 no online LLM、no API key、no committed real data 的边界。
+当前代码版本为 `0.6.0`。路线图保持工程记录和学习实践口吻；所有能力继续遵守不接入在线模型、不要求密钥、不提交真实数据的边界。
 
 ## v0.1：基础分析能力合并版
 
@@ -52,7 +52,7 @@
 - custom data workflow 优先使用手动 mapping，不完整时 fallback 而不崩溃。
 - 增加文本文件格式测试，防止关键文档被单行化。
 
-## v0.5：当前完成目标
+## v0.5：可复用分析剧本与导出
 
 目标名称：Reusable Analysis Playbooks, Visual Diagnostics and Export Bundles
 
@@ -68,9 +68,27 @@
 - CLI 增加 playbook、参数、config 和 export 参数，保留旧命令。
 - rule-based workflow 继续作为默认，LangGraph 继续保持 optional fallback。
 
-## next
+## v0.6：当前完成目标
 
-- 多表 playbook 编排和结果依赖管理。
+目标名称：中文优先体验、语义层、多表规划与质量治理
+
+范围：
+
+- 默认中文 Streamlit 界面，并提供简洁演示、专业分析和开发者模式。
+- 使用 presenter 将 AnalysisPlan、JoinPlan 和 QueryPlan 转为中文摘要。
+- 增加 SemanticCatalog、RelationshipGraph、JoinPlanner 和 MetricCompiler。
+- 增加七表模拟数据与三个多表分析剧本。
+- 增加 plan_only、fanout 风险提示和按 plan ID 审批。
+- 增加 Data Contracts、LineageGraph 和本地 Observability。
+- 增加 Core、Safety、Determinism 本地评估及 CI 质量门禁。
+- CLI 默认中文文本，并保留稳定英文 JSON schema。
+- 报告默认中文，Manifest 内部键继续保持英文。
+- OpenTelemetry、LangGraph 和 MCP preview 保持可选，不影响默认依赖。
+
+## v0.7 建议
+
+- 多表 playbook 组合和结果依赖管理。
+- 语义指标版本与兼容性治理。
 - 更多确定性统计诊断与数据质量规则。
-- 可配置但仍受 allowlist 约束的本地 SQL template catalog。
+- 评估基线的本地差异比较。
 - 导出模板版本治理和更细的大小限制提示。

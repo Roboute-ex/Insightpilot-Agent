@@ -22,6 +22,9 @@ from insightpilot.playbooks.sql_templates import (
     build_profile_query,
 )
 from insightpilot.playbooks.validation import validate_playbook_parameters
+from insightpilot.semantic.catalog import load_builtin_catalog
+from insightpilot.semantic.compiler import MetricCompiler, execute_query_plan
+from insightpilot.semantic.query import MetricRequest
 from insightpilot.tools.duckdb_engine import AnalyticsEngine
 from insightpilot.visualization.specs import ChartSpec
 
@@ -37,6 +40,7 @@ EXECUTION_ROUTES = [
     "build_result_tables",
     "build_chart_specs",
 ]
+MULTI_TABLE_PLAYBOOK_IDS = {"semantic_metric_query", "funnel_analysis", "cohort_retention"}
 
 
 def _default_table(playbook_id: str, tables: dict[str, pd.DataFrame]) -> str | None:
@@ -634,6 +638,270 @@ def _execute_periodic_summary(
     )
 
 
+def _multi_table_failure(
+    playbook: AnalysisPlaybook,
+    parameters: dict[str, Any],
+    warnings: list[str],
+) -> PlaybookExecutionResult:
+    return PlaybookExecutionResult(
+        playbook.playbook_id,
+        playbook.display_name,
+        "FAIL",
+        parameters,
+        [],
+        list(playbook.caveats_zh) or [BASE_CAVEAT],
+        {},
+        [],
+        [],
+        warnings,
+        {
+            "route_taken": EXECUTION_ROUTES[:3],
+            "requirements_satisfied": False,
+            "parameters_valid": not any("参数" in warning for warning in warnings),
+            "safe_query_generated": False,
+            "multi_table": True,
+        },
+    )
+
+
+def _execute_semantic_metric_query(
+    playbook: AnalysisPlaybook,
+    tables: dict[str, pd.DataFrame],
+    parameters: dict[str, Any],
+) -> PlaybookExecutionResult:
+    catalog = load_builtin_catalog()
+    model = catalog.get(str(parameters.get("semantic_model_id") or "commerce_demo"))
+    metric = str(parameters.get("metric") or "total_revenue")
+    raw_dimensions = parameters.get("dimensions") or []
+    dimensions = [item.strip() for item in raw_dimensions.split(",") if item.strip()] if isinstance(raw_dimensions, str) else [str(item) for item in raw_dimensions]
+    date_dimension = parameters.get("date_dimension") or None
+    if date_dimension and str(date_dimension) not in dimensions:
+        dimensions.insert(0, str(date_dimension))
+    request = MetricRequest(
+        metrics=[metric],
+        dimensions=dimensions,
+        date_dimension=str(date_dimension) if date_dimension else None,
+        date_from=str(parameters["date_from"]) if parameters.get("date_from") else None,
+        date_to=str(parameters["date_to"]) if parameters.get("date_to") else None,
+        time_grain=str(parameters.get("time_grain") or "day"),
+        limit=int(parameters.get("limit") or 1000),
+        execution_mode=str(parameters.get("execution_mode") or "execute"),
+    )
+    plan = MetricCompiler(model).compile(request)
+    frame, review = execute_query_plan(
+        plan,
+        tables,
+        approved_plan_id=str(parameters.get("approved_plan_id")) if parameters.get("approved_plan_id") else None,
+    )
+    result_tables: dict[str, pd.DataFrame] = {}
+    chart_specs: list[dict[str, Any]] = []
+    findings = [
+        f"已将语义指标“{model.metrics[metric].display_name}”编译为稳定查询计划 {plan.plan_id}。",
+        f"计划使用 {len(plan.required_entities)} 个实体、{len(plan.join_plan.steps)} 个连接步骤，风险等级为 {plan.risk_level}。",
+    ]
+    caveats = [*playbook.caveats_zh, BASE_CAVEAT]
+    warnings = [*plan.warnings]
+    executed_queries: list[dict[str, Any]] = []
+    if frame is not None:
+        result_tables["semantic_metric_result"] = frame
+        findings.append(f"只读查询已执行，返回 {len(frame)} 行指标结果。")
+        executed_queries.append(
+            {
+                "tool": "duckdb",
+                "template_id": "semantic_metric_query",
+                "purpose": "执行语义指标查询计划",
+                "query": plan.sql_template,
+                "status": "success",
+                "row_count": int(len(frame)),
+                "referenced_tables": [model.entities[item].table_name for item in plan.required_entities],
+                "referenced_columns": list(plan.output_columns),
+            }
+        )
+        if dimensions:
+            chart_type = "time_series" if request.date_dimension in dimensions else "bar"
+            chart_specs.append(
+                ChartSpec(
+                    "semantic_metric_result",
+                    chart_type,
+                    f"{model.metrics[metric].display_name}分析",
+                    "semantic_metric_result",
+                    x=dimensions[0],
+                    y=[metric],
+                    color=dimensions[1] if len(dimensions) > 1 else None,
+                    description="由语义查询计划生成的本地指标诊断。",
+                ).to_dict()
+            )
+    elif request.execution_mode == "plan_only":
+        findings.append("当前为仅预览方案模式，系统未执行 SQL。")
+        caveats.append("方案预览只用于复核配置，不包含查询结果。")
+    else:
+        warnings.append(review.reason)
+        caveats.append("高风险计划必须获得与当前 plan_id 一致的明确审批。")
+    status = "FAIL" if not plan.executable else ("WARN" if frame is None or warnings else "PASS")
+    return PlaybookExecutionResult(
+        playbook.playbook_id,
+        playbook.display_name,
+        status,
+        parameters,
+        findings,
+        list(dict.fromkeys(caveats)),
+        result_tables,
+        chart_specs,
+        executed_queries,
+        list(dict.fromkeys(warnings)),
+        {
+            "semantic_model": model.to_dict(),
+            "catalog_fingerprint": catalog.fingerprint(),
+            "metric_request": request.to_dict(),
+            "join_plan": plan.join_plan.to_dict(),
+            "query_plan": plan.to_dict(),
+            "plan_review": review.to_dict(),
+            "safe_query_generated": True,
+            "multi_table": True,
+        },
+    )
+
+
+def _execute_funnel_analysis(
+    playbook: AnalysisPlaybook,
+    tables: dict[str, pd.DataFrame],
+    parameters: dict[str, Any],
+) -> PlaybookExecutionResult:
+    required_columns = {"session_date", "visited", "viewed_product", "added_to_cart", "submitted_order", "paid"}
+    missing = sorted(required_columns - set(tables["sessions"].columns))
+    if missing:
+        return _multi_table_failure(playbook, parameters, ["sessions 缺少漏斗字段：" + ", ".join(missing)])
+    where: list[str] = []
+    bound: list[Any] = []
+    if parameters.get("date_from"):
+        where.append('"session_date" >= ?')
+        bound.append(parameters["date_from"])
+    if parameters.get("date_to"):
+        where.append('"session_date" <= ?')
+        bound.append(parameters["date_to"])
+    query = (
+        'SELECT SUM("visited") AS visit_count, SUM("viewed_product") AS view_count, '
+        'SUM("added_to_cart") AS cart_count, SUM("submitted_order") AS submit_count, '
+        'SUM("paid") AS paid_count FROM "sessions"'
+    )
+    if where:
+        query += " WHERE " + " AND ".join(where)
+    engine = AnalyticsEngine()
+    engine.register_tables(tables)
+    values = engine.run_parameterized_sql(query, bound).iloc[0]
+    stages = [
+        ("visit", "访问", int(values["visit_count"] or 0)),
+        ("view", "浏览商品", int(values["view_count"] or 0)),
+        ("cart", "加入购物车", int(values["cart_count"] or 0)),
+        ("submit", "提交订单", int(values["submit_count"] or 0)),
+        ("paid", "支付完成", int(values["paid_count"] or 0)),
+    ]
+    first = max(stages[0][2], 1)
+    rows: list[dict[str, Any]] = []
+    previous = first
+    for stage_id, label, count in stages:
+        rows.append(
+            {
+                "阶段标识": stage_id,
+                "漏斗阶段": label,
+                "人数": count,
+                "相对上一步转化率": count / previous if previous else 0.0,
+                "相对访问转化率": count / first,
+            }
+        )
+        previous = count
+    frame = pd.DataFrame(rows)
+    return PlaybookExecutionResult(
+        playbook.playbook_id,
+        playbook.display_name,
+        "PASS",
+        parameters,
+        [f"访问到支付完成的整体转化率为 {stages[-1][2] / first:.2%}。", "已按五个固定阶段生成可复核漏斗。"],
+        [*playbook.caveats_zh, BASE_CAVEAT],
+        {"funnel_summary": frame},
+        [ChartSpec("funnel_conversion", "bar", "漏斗转化", "funnel_summary", x="漏斗阶段", y=["人数"], description="各阶段模拟会话数量。").to_dict()],
+        [{"tool": "duckdb", "template_id": "funnel_analysis", "purpose": "计算固定漏斗阶段", "query": query, "status": "success", "row_count": 1, "referenced_tables": ["sessions"], "referenced_columns": sorted(required_columns)}],
+        [],
+        {"safe_query_generated": True, "multi_table": True},
+    )
+
+
+def _execute_cohort_retention(
+    playbook: AnalysisPlaybook,
+    tables: dict[str, pd.DataFrame],
+    parameters: dict[str, Any],
+) -> PlaybookExecutionResult:
+    periods = int(parameters.get("observation_periods") or 8)
+    if not 1 <= periods <= 26:
+        return _multi_table_failure(playbook, parameters, ["参数 observation_periods 必须位于 1 到 26 之间。"])
+    customer_required = {"customer_id", "signup_date"}
+    session_required = {"customer_id", "session_date"}
+    missing = sorted(customer_required - set(tables["customers"].columns)) + sorted(session_required - set(tables["sessions"].columns))
+    if missing:
+        return _multi_table_failure(playbook, parameters, ["队列留存所需字段缺失：" + ", ".join(missing)])
+    customers = tables["customers"][["customer_id", "signup_date"]].copy()
+    sessions = tables["sessions"][["customer_id", "session_date"]].copy()
+    customers["队列日期"] = pd.to_datetime(customers["signup_date"], errors="coerce").dt.to_period("W").dt.start_time
+    sessions["活动日期"] = pd.to_datetime(sessions["session_date"], errors="coerce")
+    activity = sessions.merge(customers[["customer_id", "队列日期"]], on="customer_id", how="inner")
+    activity["观察周期"] = ((activity["活动日期"] - activity["队列日期"]).dt.days // 7).astype(int)
+    activity = activity[(activity["观察周期"] >= 0) & (activity["观察周期"] < periods)]
+    cohort_sizes = customers.groupby("队列日期", as_index=False)["customer_id"].nunique().rename(columns={"customer_id": "队列人数"})
+    retained = activity.groupby(["队列日期", "观察周期"], as_index=False)["customer_id"].nunique().rename(columns={"customer_id": "留存人数"})
+    result = retained.merge(cohort_sizes, on="队列日期", how="left")
+    result["留存率"] = result["留存人数"] / result["队列人数"].replace(0, np.nan)
+    result = result[["队列日期", "队列人数", "观察周期", "留存人数", "留存率"]].sort_values(["队列日期", "观察周期"]).reset_index(drop=True)
+    return PlaybookExecutionResult(
+        playbook.playbook_id,
+        playbook.display_name,
+        "PASS",
+        parameters,
+        [f"已生成 {result['队列日期'].nunique()} 个注册队列、最多 {periods} 个观察周期的留存结果。"],
+        [*playbook.caveats_zh, BASE_CAVEAT],
+        {"cohort_retention": result},
+        [ChartSpec("cohort_retention", "line", "队列留存趋势", "cohort_retention", x="观察周期", y=["留存率"], color="队列日期", description="按注册周展示模拟客户留存率。").to_dict()],
+        [],
+        [],
+        {"uses_pandas_fallback": True, "safe_query_generated": True, "multi_table": True},
+    )
+
+
+def _execute_multi_table_playbook(
+    playbook: AnalysisPlaybook,
+    tables: dict[str, pd.DataFrame],
+    parameters: dict[str, Any] | None,
+) -> PlaybookExecutionResult:
+    normalized = _apply_defaults(playbook, parameters)
+    unknown = sorted(set(normalized) - {item.name for item in playbook.parameters})
+    missing_tables = sorted(set(playbook.requirements.required_tables) - set(tables))
+    if unknown or missing_tables:
+        warnings: list[str] = []
+        if unknown:
+            warnings.append("不支持的 playbook 参数：" + ", ".join(unknown))
+        if missing_tables:
+            warnings.append("缺少多表分析所需数据表：" + ", ".join(missing_tables))
+        return _multi_table_failure(playbook, normalized, warnings)
+    try:
+        if playbook.playbook_id == "semantic_metric_query":
+            result = _execute_semantic_metric_query(playbook, tables, normalized)
+        elif playbook.playbook_id == "funnel_analysis":
+            result = _execute_funnel_analysis(playbook, tables, normalized)
+        else:
+            result = _execute_cohort_retention(playbook, tables, normalized)
+    except Exception as exc:
+        return _multi_table_failure(playbook, normalized, [f"多表 playbook 执行失败：{exc}"])
+    result.metadata.update(
+        {
+            "route_taken": EXECUTION_ROUTES,
+            "mapping_source": "semantic_model" if playbook.requirements.requires_semantic_model else "multi_table_schema",
+            "requirements_satisfied": True,
+            "parameters_valid": True,
+            "result_table_names": sorted(result.result_tables),
+        }
+    )
+    return result
+
+
 EXECUTORS: dict[str, Callable[..., PlaybookExecutionResult]] = {
     "execute_data_profile": _execute_data_profile,
     "execute_metric_trend": _execute_metric_trend,
@@ -657,6 +925,8 @@ def execute_playbook(
     del table_metadata
     registry = get_playbook_registry()
     playbook = registry.get(playbook_id)
+    if playbook_id in MULTI_TABLE_PLAYBOOK_IDS:
+        return _execute_multi_table_playbook(playbook, tables, parameters)
     mapping, df, mapping_warnings, mapping_source = _prepare_mapping(playbook_id, tables, column_mapping)
     normalized_parameters = _apply_defaults(playbook, parameters)
     if df is None or not mapping.table_name:

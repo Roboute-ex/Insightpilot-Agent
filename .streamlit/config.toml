@@ -1,0 +1,17 @@
+[theme]
+base = "light"
+primaryColor = "#0F766E"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F3F6F5"
+textColor = "#17201F"
+baseFontSize = 14
+baseFontWeight = 400
+headingFontSizes = ["26px", "21px", "18px", "16px", "14px", "12px"]
+headingFontWeights = [650, 620, 600, 600, 600, 600]
+linkUnderline = false
+
+[server]
+headless = true
+
+[client]
+showErrorDetails = "none"

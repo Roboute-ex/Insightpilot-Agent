@@ -21,6 +21,8 @@ PARAMETER_TYPES = {
     "dimension_columns",
     "date_range",
     "choice",
+    "metric",
+    "dimensions",
 }
 PLAYBOOK_STATUSES = {"PASS", "WARN", "FAIL"}
 
@@ -72,6 +74,8 @@ class PlaybookRequirements:
     requires_treatment_column: bool = False
     requires_outcome_column: bool = False
     minimum_rows: int = 1
+    required_tables: list[str] = field(default_factory=list)
+    requires_semantic_model: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -90,6 +94,9 @@ class AnalysisPlaybook:
     output_sections: list[str]
     tags: list[str]
     version: str = "1.0"
+    field_requirements_zh: list[str] = field(default_factory=list)
+    result_description_zh: str = ""
+    caveats_zh: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -104,6 +111,9 @@ class AnalysisPlaybook:
             "output_sections": list(self.output_sections),
             "tags": list(self.tags),
             "version": self.version,
+            "field_requirements_zh": list(self.field_requirements_zh),
+            "result_description_zh": self.result_description_zh,
+            "caveats_zh": list(self.caveats_zh),
         }
 
     def supports_goal_mode(self, goal_mode: str) -> bool:

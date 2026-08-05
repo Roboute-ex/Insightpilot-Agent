@@ -10,7 +10,9 @@ from insightpilot.playbooks.registry import PlaybookRegistry, get_playbook_regis
 def test_seven_builtin_playbooks_are_registered() -> None:
     registry = get_playbook_registry()
     expected = {"data_profile", "metric_trend", "period_comparison", "dimension_contribution", "experiment_comparison", "causal_exploration", "periodic_summary"}
-    assert expected == {playbook.playbook_id for playbook in registry.list_all()}
+    registered = {playbook.playbook_id for playbook in registry.list_all()}
+    assert expected.issubset(registered)
+    assert {"semantic_metric_query", "funnel_analysis", "cohort_retention"}.issubset(registered)
 
 
 def test_registry_rejects_duplicate_and_recommends_deterministically() -> None:

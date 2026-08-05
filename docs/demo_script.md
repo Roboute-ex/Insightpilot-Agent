@@ -1,4 +1,4 @@
-# Demo 演示脚本
+# v0.6 中文演示脚本
 
 本演示只使用 synthetic data 或当前会话内存中的用户提供表。不要提交真实数据、上传文件、数据库查询结果或凭据。
 
@@ -15,12 +15,14 @@
 预期输出：
 
 - route_taken 包含 `load_data_source`、`validate_tables`、`infer_schema`、`route_metric_diagnosis`、`run_anomaly`、`run_attribution`。
+- Streamlit standard 交易场景包含 180 天、34560 行日指标和 60001 行交易明细。
+- 结果明细包含指标对比、异常检测、漏斗拆解、维度贡献、证据链、建议和数据质量表。
 - Reviewer Score 为 PASS 区间。
 - Markdown Report 包含数据来源、表结构摘要和限制说明。
 
 注意事项：
 
-- synthetic data 中目标日期的 South City 被注入订单下降信号。
+- 内置模拟数据中目标日期的多个城市、渠道、用户分层、设备版本和商户类型被注入可检测信号。
 - 归因排序用于定位优先排查方向，不代表最终因果结论。
 
 ## Demo 2：Upload CSV
@@ -158,21 +160,38 @@ CLI 示例：
 命令：
 
 ```powershell
-.\.venv\Scripts\python.exe examples/run_demo.py --scenario transaction --playbook periodic_summary --export-format markdown,html,excel,manifest,bundle
+.\.venv\Scripts\python.exe examples/run_demo.py --scenario transaction --playbook periodic_summary --export-format pdf,markdown,html,excel,manifest,bundle
 ```
 
 预期输出：
 
 - CLI 输出 playbook、run_id、backend、reviewer score 和导出路径。
-- ZIP 包含 report、Excel、manifest 和有限行数的分析结果 CSV。
+- ZIP 包含 PDF、Markdown、HTML、Excel、manifest 和有限行数的分析结果 CSV。
 - bundle 不包含 synthetic 源表文件、上传文件或数据库连接信息。
 - 已存在文件不会被静默覆盖，会追加短 run ID。
 
-## Streamlit v0.5 流程
+## Demo 8：多表语义指标与方案预览
+
+命令：
+
+```powershell
+.\.venv\Scripts\python.exe examples/run_demo.py --scenario multi_table --metric total_revenue --dimensions customer_city --plan-only
+```
+
+预期输出：
+
+- CLI 默认显示中文数据来源、分析目标、语义模型和查询计划编号。
+- QueryPlan 使用绑定参数，计划预览不执行 SQL。
+- JoinPlan 展示连接步骤、输出粒度和风险等级。
+- 切换为执行模式后，仅执行语义编译器生成的只读计划。
+
+## Streamlit v0.6 流程
 
 1. 选择数据来源并预览表。
 2. 对 custom data 配置 Column Mapping。
 3. 选择 goal mode 与 playbook。
 4. 在 form 中配置 playbook 参数并运行。
-5. 查看 Summary、Result Tables、Visual Diagnostics、Reviewer、Trace。
-6. 在 Export tab 准备内存导出并下载所需格式。
+5. 默认在简洁演示模式先查看执行摘要、核心指标、异常、贡献、漏斗和建议。
+6. 切换专业分析模式查看查询计划、连接方案、契约和血缘摘要。
+7. 切换开发者模式查看默认折叠的 JSON、SQL 模板和本地 span。
+8. 在报告导出页签准备内存导出；PDF 下载按钮排在第一位。

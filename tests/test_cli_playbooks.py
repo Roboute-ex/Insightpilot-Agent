@@ -17,7 +17,7 @@ def test_cli_lists_playbooks() -> None:
 
 
 def test_cli_runs_playbook_and_reports_run_id() -> None:
-    result = subprocess.run([sys.executable, "examples/run_demo.py", "--scenario", "transaction", "--playbook", "data_profile"], cwd=PROJECT_ROOT, text=True, capture_output=True, timeout=120, check=False)
+    result = subprocess.run([sys.executable, "examples/run_demo.py", "--scenario", "transaction", "--playbook", "data_profile", "--verbose"], cwd=PROJECT_ROOT, text=True, capture_output=True, timeout=120, check=False)
     assert result.returncode == 0, result.stderr
     assert "playbook=data_profile" in result.stdout
     assert "run_id=" in result.stdout
@@ -30,6 +30,6 @@ def test_cli_config_can_be_exported_and_loaded() -> None:
     first = subprocess.run([sys.executable, "examples/run_demo.py", "--scenario", "transaction", "--playbook", "data_profile", "--config-out", str(config_path), "--export-dir", str(temp_dir)], cwd=PROJECT_ROOT, text=True, capture_output=True, timeout=120, check=False)
     assert first.returncode == 0, first.stderr
     assert config_path.exists()
-    second = subprocess.run([sys.executable, "examples/run_demo.py", "--scenario", "transaction", "--config-in", str(config_path), "--export-dir", str(temp_dir)], cwd=PROJECT_ROOT, text=True, capture_output=True, timeout=120, check=False)
+    second = subprocess.run([sys.executable, "examples/run_demo.py", "--scenario", "transaction", "--config-in", str(config_path), "--export-dir", str(temp_dir), "--verbose"], cwd=PROJECT_ROOT, text=True, capture_output=True, timeout=120, check=False)
     assert second.returncode == 0, second.stderr
     assert "playbook=data_profile" in second.stdout

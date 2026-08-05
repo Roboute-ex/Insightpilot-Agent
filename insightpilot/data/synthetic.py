@@ -67,9 +67,16 @@ def _build_daily_metrics(rng: np.random.Generator) -> pd.DataFrame:
             cvr *= 0.82
             payment_success_rate *= 0.94
         clicks = int(round(impressions * ctr))
-        orders = int(round(clicks * cvr * payment_success_rate))
+        visitors = int(round(clicks * 0.88))
+        add_to_cart_users = int(round(visitors * min(0.82, cvr * 3.2)))
+        checkout_users = int(round(add_to_cart_users * 0.68))
+        payment_attempts = int(round(checkout_users * 0.92))
+        successful_payments = int(rng.binomial(payment_attempts, payment_success_rate))
+        orders = successful_payments
         price = rng.normal(74, 12)
         revenue = max(0.0, orders * price)
+        refund_orders = int(round(orders * rng.uniform(0.01, 0.05)))
+        refund_amount = refund_orders * price * rng.uniform(0.75, 1.0)
         rows.append(
             {
                 "date": date.normalize(),
@@ -80,11 +87,21 @@ def _build_daily_metrics(rng: np.random.Generator) -> pd.DataFrame:
                 "merchant_type": merchant_types[(date.day + len(city) + len(channel)) % len(merchant_types)],
                 "impressions": impressions,
                 "clicks": clicks,
+                "visitors": visitors,
+                "add_to_cart_users": add_to_cart_users,
+                "checkout_users": checkout_users,
+                "payment_attempts": payment_attempts,
+                "successful_payments": successful_payments,
                 "orders": orders,
                 "revenue": round(revenue, 2),
+                "refund_orders": refund_orders,
+                "refund_amount": round(refund_amount, 2),
                 "ctr": clicks / impressions if impressions else 0.0,
                 "cvr": orders / clicks if clicks else 0.0,
+                "conversion_rate": orders / visitors if visitors else 0.0,
                 "payment_success_rate": payment_success_rate,
+                "average_order_value": revenue / orders if orders else 0.0,
+                "refund_rate": refund_orders / orders if orders else 0.0,
                 "active_users": int(impressions * rng.uniform(0.18, 0.32)),
             }
         )
@@ -264,4 +281,115 @@ def generate_all_demo_data(seed: int = 42) -> dict[str, pd.DataFrame]:
         "live_sessions": live_sessions,
         "live_quality_logs": live_quality_logs,
         "live_interactions": live_interactions,
+    }
+
+
+def generate_multi_table_commerce_data(seed: int = 42) -> dict[str, pd.DataFrame]:
+    """Return a deterministic seven-table synthetic dataset for semantic analysis.
+
+    The dataset is deliberately small enough for local execution. Identifiers are
+    internally consistent, and the generated behavior supports metric, funnel,
+    cohort, join-planning, contract, and lineage demonstrations.
+    """
+
+    rng = np.random.default_rng(seed)
+    dates = pd.date_range(end=pd.Timestamp(SYNTHETIC_END_DATE), periods=112, freq="D")
+    channels = pd.DataFrame(
+        {
+            "channel_id": np.arange(1, 5),
+            "channel_name": ["自然访问", "站内搜索", "内容推荐", "合作入口"],
+        }
+    )
+    products = pd.DataFrame(
+        {
+            "product_id": np.arange(1, 81),
+            "category": rng.choice(["日常用品", "数字配件", "居家用品", "学习用品"], size=80),
+            "unit_price": np.round(rng.uniform(12.0, 260.0, size=80), 2),
+        }
+    )
+    customer_count = 600
+    signup_dates = rng.choice(dates[:70], size=customer_count)
+    customers = pd.DataFrame(
+        {
+            "customer_id": np.arange(1, customer_count + 1),
+            "signup_date": pd.to_datetime(signup_dates),
+            "city": rng.choice(["北城", "南城", "东城", "西城", "中城"], size=customer_count),
+            "segment": rng.choice(["新客", "活跃", "回访"], size=customer_count, p=[0.32, 0.46, 0.22]),
+        }
+    )
+
+    session_count = 4200
+    session_customers = rng.choice(customers["customer_id"].to_numpy(), size=session_count)
+    signup_lookup = customers.set_index("customer_id")["signup_date"]
+    session_dates: list[pd.Timestamp] = []
+    for customer_id in session_customers:
+        eligible = dates[dates >= pd.Timestamp(signup_lookup.loc[customer_id])]
+        session_dates.append(pd.Timestamp(rng.choice(eligible)))
+    viewed = rng.binomial(1, 0.76, size=session_count)
+    added = viewed * rng.binomial(1, 0.43, size=session_count)
+    submitted = added * rng.binomial(1, 0.58, size=session_count)
+    paid = submitted * rng.binomial(1, 0.82, size=session_count)
+    sessions = pd.DataFrame(
+        {
+            "session_id": np.arange(1, session_count + 1),
+            "customer_id": session_customers,
+            "channel_id": rng.choice(channels["channel_id"].to_numpy(), size=session_count),
+            "session_date": pd.to_datetime(session_dates),
+            "visited": np.ones(session_count, dtype=int),
+            "viewed_product": viewed.astype(int),
+            "added_to_cart": added.astype(int),
+            "submitted_order": submitted.astype(int),
+            "paid": paid.astype(int),
+        }
+    )
+
+    paid_sessions = sessions.loc[sessions["paid"] == 1].reset_index(drop=True)
+    orders = pd.DataFrame(
+        {
+            "order_id": np.arange(1, len(paid_sessions) + 1),
+            "customer_id": paid_sessions["customer_id"].to_numpy(),
+            "session_id": paid_sessions["session_id"].to_numpy(),
+            "order_date": paid_sessions["session_date"].to_numpy(),
+            "status": "paid",
+            "total_amount": np.zeros(len(paid_sessions), dtype=float),
+        }
+    )
+    item_rows: list[dict[str, object]] = []
+    item_id = 1
+    product_prices = products.set_index("product_id")["unit_price"]
+    order_totals: dict[int, float] = {}
+    for order_id in orders["order_id"]:
+        total = 0.0
+        for _ in range(int(rng.integers(1, 4))):
+            product_id = int(rng.choice(products["product_id"].to_numpy()))
+            quantity = int(rng.integers(1, 4))
+            line_amount = round(float(product_prices.loc[product_id]) * quantity, 2)
+            item_rows.append(
+                {
+                    "order_item_id": item_id,
+                    "order_id": int(order_id),
+                    "product_id": product_id,
+                    "quantity": quantity,
+                    "line_amount": line_amount,
+                }
+            )
+            item_id += 1
+            total += line_amount
+        order_totals[int(order_id)] = round(total, 2)
+    order_items = pd.DataFrame(item_rows)
+    if not orders.empty:
+        orders["total_amount"] = orders["order_id"].map(order_totals).astype(float)
+
+    calendar = pd.DataFrame({"date": dates})
+    calendar["week_start"] = calendar["date"].dt.to_period("W").dt.start_time
+    calendar["month_start"] = calendar["date"].dt.to_period("M").dt.start_time
+    calendar["week_number"] = calendar["date"].dt.isocalendar().week.astype(int)
+    return {
+        "customers": customers,
+        "sessions": sessions,
+        "orders": orders,
+        "order_items": order_items,
+        "products": products,
+        "channels": channels,
+        "calendar": calendar,
     }

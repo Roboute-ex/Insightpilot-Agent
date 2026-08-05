@@ -1,0 +1,196 @@
+model_id: commerce_demo
+version: "1.0"
+display_name: 多表交易行为模拟模型
+description: 用于本地学习研究的七表模拟语义模型。
+
+entities:
+  customers:
+    table_name: customers
+    primary_key: customer_id
+    display_name: 客户
+    grain: 每位客户一行
+  sessions:
+    table_name: sessions
+    primary_key: session_id
+    display_name: 访问会话
+    grain: 每次会话一行
+  orders:
+    table_name: orders
+    primary_key: order_id
+    display_name: 订单
+    grain: 每笔订单一行
+  order_items:
+    table_name: order_items
+    primary_key: order_item_id
+    display_name: 订单明细
+    grain: 每个订单商品一行
+  products:
+    table_name: products
+    primary_key: product_id
+    display_name: 商品
+    grain: 每件商品一行
+  channels:
+    table_name: channels
+    primary_key: channel_id
+    display_name: 渠道
+    grain: 每个渠道一行
+  calendar:
+    table_name: calendar
+    primary_key: date
+    display_name: 日历
+    grain: 每个日期一行
+
+dimensions:
+  order_date:
+    entity_id: orders
+    column: order_date
+    data_type: date
+    display_name: 订单日期
+    is_time_dimension: true
+  session_date:
+    entity_id: sessions
+    column: session_date
+    data_type: date
+    display_name: 会话日期
+    is_time_dimension: true
+  customer_city:
+    entity_id: customers
+    column: city
+    display_name: 城市
+  customer_segment:
+    entity_id: customers
+    column: segment
+    display_name: 客户分层
+  channel_name:
+    entity_id: channels
+    column: channel_name
+    display_name: 渠道
+  product_category:
+    entity_id: products
+    column: category
+    display_name: 商品分类
+  order_status:
+    entity_id: orders
+    column: status
+    display_name: 订单状态
+
+measures:
+  order_revenue:
+    entity_id: orders
+    column: total_amount
+    aggregation: sum
+    display_name: 订单金额合计
+  order_count_measure:
+    entity_id: orders
+    column: order_id
+    aggregation: count_distinct
+    display_name: 订单数
+  customer_count_measure:
+    entity_id: customers
+    column: customer_id
+    aggregation: count_distinct
+    display_name: 客户数
+  session_count_measure:
+    entity_id: sessions
+    column: session_id
+    aggregation: count_distinct
+    display_name: 会话数
+  paid_session_measure:
+    entity_id: sessions
+    column: paid
+    aggregation: sum
+    display_name: 支付会话数
+  item_revenue:
+    entity_id: order_items
+    column: line_amount
+    aggregation: sum
+    display_name: 商品明细金额
+
+metrics:
+  total_revenue:
+    metric_type: simple
+    display_name: 总金额
+    measure_id: order_revenue
+    format: currency
+  order_count:
+    metric_type: simple
+    display_name: 订单量
+    measure_id: order_count_measure
+  customer_count:
+    metric_type: simple
+    display_name: 客户数
+    measure_id: customer_count_measure
+  session_count:
+    metric_type: simple
+    display_name: 会话数
+    measure_id: session_count_measure
+  paid_session_count:
+    metric_type: simple
+    display_name: 支付完成会话数
+    measure_id: paid_session_measure
+  average_order_value:
+    metric_type: ratio
+    display_name: 平均每单金额
+    numerator_metric: total_revenue
+    denominator_metric: order_count
+    format: currency
+  session_conversion_rate:
+    metric_type: ratio
+    display_name: 会话转化率
+    numerator_metric: paid_session_count
+    denominator_metric: session_count
+    format: percent
+  revenue_minus_orders:
+    metric_type: derived
+    display_name: 金额与订单量差值示例
+    input_metrics: [total_revenue, order_count]
+    operation: subtract
+  cumulative_revenue:
+    metric_type: cumulative
+    display_name: 累计金额
+    base_metric: total_revenue
+    format: currency
+
+relationships:
+  - relationship_id: orders_to_customers
+    from_entity: orders
+    to_entity: customers
+    from_column: customer_id
+    to_column: customer_id
+    cardinality: many_to_one
+  - relationship_id: orders_to_sessions
+    from_entity: orders
+    to_entity: sessions
+    from_column: session_id
+    to_column: session_id
+    cardinality: many_to_one
+  - relationship_id: sessions_to_customers
+    from_entity: sessions
+    to_entity: customers
+    from_column: customer_id
+    to_column: customer_id
+    cardinality: many_to_one
+  - relationship_id: sessions_to_channels
+    from_entity: sessions
+    to_entity: channels
+    from_column: channel_id
+    to_column: channel_id
+    cardinality: many_to_one
+  - relationship_id: order_items_to_orders
+    from_entity: order_items
+    to_entity: orders
+    from_column: order_id
+    to_column: order_id
+    cardinality: many_to_one
+  - relationship_id: order_items_to_products
+    from_entity: order_items
+    to_entity: products
+    from_column: product_id
+    to_column: product_id
+    cardinality: many_to_one
+  - relationship_id: orders_to_calendar
+    from_entity: orders
+    to_entity: calendar
+    from_column: order_date
+    to_column: date
+    cardinality: many_to_one

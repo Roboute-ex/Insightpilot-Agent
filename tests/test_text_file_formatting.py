@@ -30,7 +30,7 @@ def test_pyproject_is_multiline_and_parseable() -> None:
     text = _read("pyproject.toml")
     assert len(text.splitlines()) > 10
     parsed = tomllib.loads(text)
-    assert parsed["project"]["version"] == "0.5.0"
+    assert parsed["project"]["version"] == "0.6.0"
 
 
 def test_ci_yaml_is_multiline_and_structured() -> None:
@@ -62,6 +62,15 @@ def test_docs_are_not_single_line_long_text() -> None:
         "docs/report_exports.md",
         "docs/run_manifest.md",
         "docs/releases/v0.5.md",
+        "docs/chinese_ui.md",
+        "docs/demo_mode.md",
+        "docs/developer_mode.md",
+        "docs/semantic_layer.md",
+        "docs/multi_table_planning.md",
+        "docs/evaluation.md",
+        "docs/observability.md",
+        "docs/lineage.md",
+        "docs/releases/v0.6.md",
     ]:
         text = _read(path)
         assert len(text.splitlines()) > 10

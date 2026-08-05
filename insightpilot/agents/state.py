@@ -61,7 +61,7 @@ class WorkflowState:
     executed_queries: list[dict[str, Any]] = field(default_factory=list)
     intermediate_results: dict[str, Any] = field(default_factory=dict)
     findings: list[str] = field(default_factory=list)
-    caveats: list[str] = field(default_factory=list)
+    caveats: list[Any] = field(default_factory=list)
     data_source_type: str = "synthetic"
     table_metadata: dict[str, Any] = field(default_factory=dict)
     schema_warnings: list[str] = field(default_factory=list)
@@ -75,6 +75,19 @@ class WorkflowState:
     chart_specs: list[dict[str, Any]] = field(default_factory=list)
     run_manifest: dict[str, Any] = field(default_factory=dict)
     export_formats: list[str] = field(default_factory=list)
+    semantic_model: dict[str, Any] = field(default_factory=dict)
+    semantic_catalog: dict[str, Any] = field(default_factory=dict)
+    metric_request: dict[str, Any] = field(default_factory=dict)
+    relationship_graph: dict[str, Any] = field(default_factory=dict)
+    join_plan: dict[str, Any] = field(default_factory=dict)
+    query_plan: dict[str, Any] = field(default_factory=dict)
+    plan_review: dict[str, Any] = field(default_factory=dict)
+    execution_mode: str = "execute"
+    contract_results: list[dict[str, Any]] = field(default_factory=list)
+    lineage: dict[str, Any] = field(default_factory=dict)
+    telemetry: dict[str, Any] = field(default_factory=dict)
+    evaluation_summary: dict[str, Any] = field(default_factory=dict)
+    analysis_result_package: dict[str, Any] = field(default_factory=dict)
     reviewer_status: str = ""
     reviewer_issues: list[str] = field(default_factory=list)
     reviewer_suggestions: list[str] = field(default_factory=list)
@@ -112,6 +125,7 @@ def create_initial_state(
     column_mapping: dict[str, Any] | None = None,
     playbook_id: str | None = None,
     playbook_parameters: dict[str, Any] | None = None,
+    execution_mode: str = "execute",
 ) -> WorkflowState:
     """Create a safe initial state for a workflow run."""
 
@@ -131,4 +145,5 @@ def create_initial_state(
         selected_playbook_id=playbook_id,
         playbook_source="user_selected" if playbook_id and playbook_id not in {"auto", "auto_recommended"} else "none",
         playbook_parameters=playbook_parameters or {},
+        execution_mode=execution_mode if execution_mode in {"plan_only", "execute"} else "execute",
     )

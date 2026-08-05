@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import MISSING, asdict, dataclass, field
 from pathlib import PurePath
 from typing import Any
 
@@ -84,8 +84,18 @@ class RunManifest:
     route_taken: list[str]
     reviewer_status: str
     reviewer_score: int
-    caveats: list[str] = field(default_factory=list)
+    caveats: list[Any] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    semantic_model_id: str | None = None
+    catalog_fingerprint: str | None = None
+    metric_request: dict[str, Any] = field(default_factory=dict)
+    query_plan_id: str | None = None
+    join_plan_id: str | None = None
+    plan_review: dict[str, Any] = field(default_factory=dict)
+    contract_summary: dict[str, Any] = field(default_factory=dict)
+    lineage_summary: dict[str, Any] = field(default_factory=dict)
+    telemetry_summary: dict[str, Any] = field(default_factory=dict)
+    evaluation_summary: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return sanitize_manifest_value(asdict(self))
@@ -97,8 +107,15 @@ class RunManifest:
     def from_dict(cls, values: dict[str, Any]) -> "RunManifest":
         if not isinstance(values, dict):
             raise ValueError("manifest 必须是 JSON object。")
-        field_names = cls.__dataclass_fields__.keys()
-        missing = [name for name in field_names if name not in values and name not in {"caveats", "errors"}]
+        fields = cls.__dataclass_fields__
+        field_names = fields.keys()
+        missing = [
+            name
+            for name, definition in fields.items()
+            if name not in values
+            and definition.default is MISSING
+            and definition.default_factory is MISSING
+        ]
         if missing:
             raise ValueError(f"manifest 缺少字段：{', '.join(missing)}")
         manifest = cls(**{key: values[key] for key in field_names if key in values})
