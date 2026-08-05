@@ -21,12 +21,13 @@ InsightPilot Agent 是 synthetic-data-first 的本地分析自动化工作台，
 
 ## 版本语义规则
 
-- 当前 `0.5.0` 表示 Reusable Analysis Playbooks, Visual Diagnostics and Export Bundles。
+- 当前 `0.6.0` 表示中文优先界面、Semantic Layer、多表规划与质量治理。
 - v0.1 是基础分析能力合并版。
 - v0.2 聚焦 WorkflowState、route_taken、AnalysisTrace、ReviewerResult、workflow_backend 和 optional LangGraph fallback。
 - v0.3 聚焦 CSV / Excel upload、database query ingestion、schema mapping、validation 和 custom data fallback。
 - v0.4 聚焦 ColumnMapping、Metric Mapping UI、custom data usability、documentation polish 和 format normalization。
 - v0.5 聚焦 AnalysisPlaybook、safe SQL templates、ChartSpec、RunManifest 和 in-memory export bundles。
+- v0.6 聚焦三种界面模式、SemanticCatalog、JoinPlanner、MetricCompiler、Data Contracts、Lineage、Observability 和 Evaluation Suites。
 
 ## 文本文件格式规则
 
@@ -83,6 +84,19 @@ InsightPilot Agent 是 synthetic-data-first 的本地分析自动化工作台，
 - HTML 不依赖在线 CDN，Excel 和 ZIP 默认在内存生成。
 - exports 不得包含 secrets、上传源文件或数据库连接信息。
 - result CSV、HTML preview 和 Excel result sheet 必须保留行数上限。
+- PDF 必须使用中文 CID 字体并返回内存 bytes，不提交字体文件。
+- PDF 下载按钮必须排在所有报告下载按钮第一位，ZIP 必须包含 `report.pdf`。
+
+## 结果优先分析要求
+
+- 不得用 AnalysisPlan 代替 AnalysisResult；方案预览不能冒充已经执行的计算。
+- legacy workflow 必须输出非空结构化 result tables，并适配 AnalysisResultPackage。
+- 所有用户可见结论必须有结构化结果或 AnalysisEvidence 支撑。
+- ActionRecommendation 必须引用存在的 evidence_id。
+- 用户页面默认不得显示原始指标 ID，开发者模式才可以附带稳定英文 ID。
+- 不使用训练模型或生成式文字填补分析逻辑、结果表或证据链缺口。
+- 内置模拟数据异常必须在生成逻辑中注入，结果层不得读取 scenario metadata 硬编码结论。
+- PDF、Markdown、HTML 和 Excel 必须包含实际分析结果章节。
 
 ## RunManifest 维护要求
 
@@ -120,6 +134,33 @@ InsightPilot Agent 是 synthetic-data-first 的本地分析自动化工作台，
 - 缺少 LangGraph 时项目必须继续使用 rule-based workflow。
 - `requirements.txt` 不要加入 LangGraph；`requirements-langgraph.txt` 单独管理。
 - `requirements.txt` 包含 v0.3 默认能力所需的 openpyxl 和 SQLAlchemy。
+- OpenTelemetry 与 MCP preview 不得成为默认依赖，不得配置在线 exporter。
+
+## 中文界面维护要求
+
+- 默认 ViewMode 必须为 `demo`，原始 JSON 仅在 `developer` 模式展示。
+- 用户可见标签、按钮、错误、警告、空状态、表头和报告以中文为主。
+- 内部 dataclass、枚举、QueryPlan、Manifest 和 CLI JSON key 保持稳定英文。
+- 所有 `st.json` 必须显式设置 `expanded=False`。
+- UI 文案集中维护在 `insightpilot/ui/`，不得在主页面重复维护映射。
+- 紧凑摘要卡片标题使用 12pt，正文使用 10.5pt，不使用 `st.metric` 充当大字号正文卡片。
+
+## Semantic Layer 维护要求
+
+- 语义模型集中维护在 `insightpilot/semantic/models/`，只使用 `yaml.safe_load`。
+- 表名、字段名、指标和维度必须经过 SemanticCatalog allowlist。
+- MetricCompiler 不接受 SQL fragment，所有 scalar 使用参数绑定。
+- QueryPlan ID 和 JoinPlan ID 对相同输入必须 deterministic。
+- fanout 风险必须进入 Plan Review；many-to-many 默认禁止。
+- 高风险批准必须匹配当前 plan ID，计划变化后旧批准失效。
+
+## Governance 与 Evaluation
+
+- Data Contract、Lineage 和 Observability 只保存安全摘要，不保存完整源数据或凭据。
+- 本地 trace 不连接网络；可选 OpenTelemetry 未安装时自动回退。
+- Core overall 必须不低于 0.95，数值正确性不低于 0.98。
+- SQL Safety 和 Determinism 必须为 1.0。
+- CI 必须运行语义模型校验、全量 pytest、三套评估、中文 UI 冒烟和 JSON schema 稳定性测试。
 
 ## Reviewer Score 维护要求
 
@@ -143,7 +184,8 @@ InsightPilot Agent 是 synthetic-data-first 的本地分析自动化工作台，
 - 不写具体组织或品牌名称。
 - 不写与真实数据入库相冲突的示例。
 - 所有限制说明要明确 synthetic data、相关性和不确定性边界。
+- Release 说明主体使用中文。
 
 ## 后续版本建议
 
-- v0.6：多表 playbook 编排、更多本地统计诊断、导出模板版本治理和可复核的结果依赖关系。
+- v0.7：多表 playbook 组合、语义指标版本治理、更多本地统计诊断和评估基线比较。
