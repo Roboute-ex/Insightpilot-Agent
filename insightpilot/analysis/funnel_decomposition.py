@@ -24,19 +24,25 @@ def decompose_transaction_funnel(frame: pd.DataFrame, date_col: str = "date") ->
     missing = required - set(frame.columns)
     if missing:
         raise ValueError(f"Missing funnel columns: {', '.join(sorted(missing))}")
-    working = frame.copy()
+    working = frame.loc[:,[date_col,*[stage for stage,_ in FUNNEL_STAGES]]].copy()
     working[date_col] = pd.to_datetime(working[date_col]).dt.normalize()
-    daily = working.groupby(date_col, as_index=False)[[stage for stage, _ in FUNNEL_STAGES]].sum().sort_values(date_col)
+    daily = working.groupby(date_col, as_index=False,observed=True)[[stage for stage, _ in FUNNEL_STAGES]].sum().sort_values(date_col)
     if len(daily) < 8:
         raise ValueError("At least eight dated observations are required for funnel decomposition")
     current = daily.iloc[-1]
-    baseline = daily.iloc[-8:-1].mean(numeric_only=True)
+    target_date = pd.Timestamp(current[date_col])
+    history = daily[(daily[date_col] < target_date) & (daily[date_col] >= target_date - pd.Timedelta(days=7))]
+    if len(history) != 7:
+        raise ValueError("漏斗基准必须有完整前7个日历日。")
+    baseline = history.mean(numeric_only=True)
     current_counts = np.array([float(current[stage]) for stage, _ in FUNNEL_STAGES])
     baseline_counts = np.array([float(baseline[stage]) for stage, _ in FUNNEL_STAGES])
     current_rates = np.ones(len(FUNNEL_STAGES))
     baseline_rates = np.ones(len(FUNNEL_STAGES))
-    current_rates[1:] = current_counts[1:] / np.maximum(current_counts[:-1], 1.0)
-    baseline_rates[1:] = baseline_counts[1:] / np.maximum(baseline_counts[:-1], 1.0)
+    if (current_counts[:-1] <= 0).any() or (baseline_counts[:-1] <= 0).any():
+        raise ValueError("漏斗阶段分母为零，顺序分解不可计算。")
+    current_rates[1:] = current_counts[1:] / current_counts[:-1]
+    baseline_rates[1:] = baseline_counts[1:] / baseline_counts[:-1]
 
     baseline_factors = np.concatenate(([baseline_counts[0]], baseline_rates[1:]))
     current_factors = np.concatenate(([current_counts[0]], current_rates[1:]))
@@ -65,5 +71,9 @@ def decompose_transaction_funnel(frame: pd.DataFrame, date_col: str = "date") ->
             estimated_order_impact=float(impact),
             contribution_pct=float(abs(impact) / denominator),
             severity=severity,
+            net_change_contribution=float(impact / (current_counts[-1] - baseline_counts[-1])) if current_counts[-1] != baseline_counts[-1] else None,
+            decomposition_order=index + 1,
+            residual_error=float(current_counts[-1] - baseline_counts[-1] - sum(impacts)),
+            method="曝光→点击→访问→加购→提交→尝试→成功的固定顺序算术替换；非因果；contribution_pct为绝对影响占比；七阶段均为转化旅程计数，历史*_users字段不是全站UV",
         ))
     return results

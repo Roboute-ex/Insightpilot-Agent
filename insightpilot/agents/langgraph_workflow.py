@@ -1,12 +1,15 @@
 """Optional LangGraph workflow wrapper.
 
-LangGraph is intentionally optional. Import failures or incompatible APIs are
-handled by ``run_agent_analysis`` in ``workflow.py`` via rule-based fallback.
+LangGraph is optional. Missing installation uses rule-based fallback. Installed
+backend node/API failures are reported as real failures without silent rerun.
 """
 
 from __future__ import annotations
 
+from insightpilot.performance_tasks import cancellation_checkpoint, report_stage
+
 from typing import Any, TypedDict
+from dataclasses import fields
 
 import pandas as pd
 
@@ -34,50 +37,20 @@ from insightpilot.agents.workflow import (
     _run_metric_diagnosis_node,
     _run_periodic_report_node,
     _run_playbook_node,
+    _run_routed_analysis,
+    _set_observability,
+    _initialize_run_options,
+    _finalize_observability,
     _safe_engine,
+    _scope_analysis_tables,
 )
 
+from insightpilot.observability.tracer import LocalTracer, use_tracer
+from insightpilot.analysis.reuse import aggregate_scope
 
-class GraphState(TypedDict, total=False):
-    user_question: str
-    goal_mode: str
-    goal_mode_display_name: str
-    goal_mode_source: str
-    intent: str
-    selected_metrics: list[str]
-    analysis_plan: dict[str, Any]
-    tables_available: list[str]
-    executed_queries: list[dict[str, Any]]
-    intermediate_results: dict[str, Any]
-    findings: list[str]
-    caveats: list[str]
-    column_mapping: dict[str, Any]
-    mapping_warnings: list[str]
-    mapping_source: str
-    selected_playbook_id: str | None
-    playbook_source: str
-    playbook_parameters: dict[str, Any]
-    chart_specs: list[dict[str, Any]]
-    run_manifest: dict[str, Any]
-    export_formats: list[str]
-    semantic_model: dict[str, Any]
-    semantic_catalog: dict[str, Any]
-    metric_request: dict[str, Any]
-    relationship_graph: dict[str, Any]
-    join_plan: dict[str, Any]
-    query_plan: dict[str, Any]
-    plan_review: dict[str, Any]
-    execution_mode: str
-    contract_results: list[dict[str, Any]]
-    lineage: dict[str, Any]
-    telemetry: dict[str, Any]
-    evaluation_summary: dict[str, Any]
-    analysis_result_package: dict[str, Any]
-    reviewer_status: str
-    reviewer_issues: list[str]
-    reviewer_suggestions: list[str]
-    route_taken: list[str]
-    errors: list[str]
+# Keep the graph schema synchronized with every shared WorkflowState field.
+# Missing TypedDict keys are silently dropped by LangGraph between nodes.
+GraphState = TypedDict("GraphState", {item.name: Any for item in fields(WorkflowState)}, total=False)
 
 
 def _state(values: dict[str, Any] | WorkflowState) -> WorkflowState:
@@ -96,6 +69,8 @@ def run_langgraph_workflow(
     playbook_id: str | None = None,
     playbook_parameters: dict[str, Any] | None = None,
     execution_mode: str = "execute",
+    presentation_mode: str = "eager",
+    prepared_dataset=None,
 ) -> dict[str, Any]:
     """Run the optional LangGraph graph and return the standard workflow result."""
 
@@ -108,16 +83,38 @@ def run_langgraph_workflow(
 
     def node(fn):
         def wrapped(values: GraphState) -> GraphState:
+            cancellation_checkpoint()
             state = _state(values)
-            fn(state, tables, engine)
+            if fn is _build_observability_node:
+                report_stage("observability")
+                _set_observability(state, tracer)
+            else:
+                with tracer.span(fn.__name__.strip("_")):
+                    analysis_nodes = {_run_routed_analysis, _run_metric_diagnosis_node, _run_growth_trend_node, _run_experiment_node, _run_content_performance_node, _run_live_quality_node, _run_causal_exploration_node, _run_periodic_report_node, _build_analysis_results_node}
+                    if fn in analysis_nodes and state.planning_status == "ready" and state.playbook_parameters.get("date_range") and not state.selected_playbook_id:
+                        scoped = _scope_analysis_tables(state, tables)
+                        scoped_engine = _safe_engine(scoped)
+                        try:
+                            fn(state, scoped, scoped_engine)
+                        finally:
+                            if scoped_engine is not None:
+                                scoped_engine.close()
+                    else:
+                        fn(state, tables, engine)
+            cancellation_checkpoint()
             return dict(state.__dict__)
 
         return wrapped
 
     def route(values: GraphState) -> str:
+        cancellation_checkpoint()
         current = _state(values)
+        if current.planning_status != "ready":
+            return "routed_analysis"
         if current.execution_mode == "plan_only" and current.selected_playbook_id != "semantic_metric_query":
             return "plan_preview"
+        if not current.selected_playbook_id and (current.user_table_mode or (not current.selected_metrics and current.goal_mode_source == "auto_detected" and current.intent == "general_summary")):
+            return "routed_analysis"
         return "playbook" if current.selected_playbook_id else _route_from_plan(current)
 
     initial_state = create_initial_state(
@@ -131,7 +128,9 @@ def run_langgraph_workflow(
         playbook_parameters=playbook_parameters,
         execution_mode=execution_mode,
     )
+    _initialize_run_options(initial_state,presentation_mode,prepared_dataset)
     initial_state.intermediate_results["workflow_backend"] = WORKFLOW_BACKEND_LANGGRAPH
+    tracer = LocalTracer(initial_state.trace_id)
 
     try:
         graph = StateGraph(GraphState)
@@ -147,6 +146,7 @@ def run_langgraph_workflow(
         graph.add_node("causal_exploration", node(_run_causal_exploration_node))
         graph.add_node("periodic_report", node(_run_periodic_report_node))
         graph.add_node("playbook", node(_run_playbook_node))
+        graph.add_node("routed_analysis", node(_run_routed_analysis))
         graph.add_node("plan_preview", node(_preview_analysis_plan_node))
         graph.add_node("build_analysis_results", node(_build_analysis_results_node))
         graph.add_node("governance", node(_build_governance_node))
@@ -171,6 +171,7 @@ def run_langgraph_workflow(
                 "causal_exploration": "causal_exploration",
                 "periodic_report": "periodic_report",
                 "playbook": "playbook",
+                "routed_analysis": "routed_analysis",
                 "plan_preview": "plan_preview",
             },
         )
@@ -183,6 +184,7 @@ def run_langgraph_workflow(
             "causal_exploration",
             "periodic_report",
             "playbook",
+            "routed_analysis",
             "plan_preview",
         ]:
             graph.add_edge(route_node, "build_analysis_results")
@@ -194,14 +196,18 @@ def run_langgraph_workflow(
         graph.add_edge("report", END)
 
         compiled = graph.compile()
-        final_values = compiled.invoke(initial_state.to_dict())
+        with use_tracer(tracer), aggregate_scope():
+            final_values = compiled.invoke(initial_state.to_dict())
     except Exception as exc:  # pragma: no cover - depends on optional API versions
         raise RuntimeError(f"LangGraph workflow failed: {exc}") from exc
+    finally:
+        if engine is not None:
+            engine.close()
 
     final_state = _state(final_values)
     result = final_state.intermediate_results.get("result")
     if isinstance(result, dict):
-        return result
+        return _finalize_observability(final_state,tracer)
     result = _build_result_from_state(final_state)
     result["report_markdown"] = result.get("report_markdown", "")
     return result

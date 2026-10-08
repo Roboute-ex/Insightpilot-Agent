@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import pandas as pd
 
-from insightpilot.analysis.anomaly import _aggregate
+from insightpilot.analysis.anomaly import _aggregate, MEAN_METRICS
+from insightpilot.metrics.aggregation import metric_components
 
 
 def dimension_contribution(
@@ -13,6 +14,7 @@ def dimension_contribution(
     dimension_col: str,
     date_col: str = "date",
     target_date: object | None = None,
+    aggregation: str | None = None,
 ) -> pd.DataFrame:
     """Rank dimension values by absolute contribution to target-date change."""
 
@@ -21,15 +23,18 @@ def dimension_contribution(
     if missing:
         raise ValueError(f"Missing columns: {', '.join(sorted(missing))}")
 
-    working = df.copy()
+    pair = metric_components(metric_col, df.columns) if aggregation is not None else None
+    working = df.loc[:,list(dict.fromkeys([date_col,dimension_col,metric_col,*(pair or ())]))].copy()
     working[date_col] = pd.to_datetime(working[date_col])
     target = pd.Timestamp(target_date).normalize() if target_date is not None else working[date_col].max().normalize()
 
-    daily = (
-        working.groupby([date_col, dimension_col])[metric_col]
-        .apply(lambda values: _aggregate(values, metric_col))
-        .reset_index(name="metric_value")
-    )
+    if pair:
+        numerator, denominator = pair
+        daily = working.groupby([date_col, dimension_col], observed=True)[[numerator, denominator]].sum().reset_index()
+        daily["metric_value"] = daily[numerator] / daily[denominator].replace(0, float("nan"))
+    else:
+        method = aggregation or ("mean" if metric_col in MEAN_METRICS or metric_col.endswith(("_rate", "_time")) else "sum")
+        daily = working.groupby([date_col, dimension_col], observed=True)[metric_col].agg("nunique" if method == "count_distinct" else method).reset_index(name="metric_value")
     current = daily[daily[date_col] == target][[dimension_col, "metric_value"]].rename(
         columns={"metric_value": "current_value"}
     )

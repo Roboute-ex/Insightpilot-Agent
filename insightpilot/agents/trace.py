@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import fields, dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
@@ -96,6 +96,6 @@ class AnalysisTrace:
     errors: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        data = asdict(self)
+        data = {item.name: getattr(self, item.name) for item in fields(self)}
         data["executed_queries"] = [_normalize_query_record(record) for record in self.executed_queries]
         return _json_safe(data)

@@ -1,0 +1,10 @@
+include README.md AGENTS.md requirements*.txt .gitignore .gitattributes
+recursive-include app *.py
+recursive-include examples *.py
+recursive-include scripts *.py *.ps1
+recursive-include docs *.md
+recursive-include tests *.py
+recursive-include insightpilot *.py *.yaml *.yml
+include .streamlit/config.toml
+include .github/workflows/ci.yml
+include tests/fixtures/format_recovery.xls

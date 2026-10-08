@@ -6,10 +6,11 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from insightpilot.semantic.join_planner import JoinPlan
+from insightpilot.tools.sql_safety import SQL_POLICY_VERSION
 
 
 FILTER_OPERATORS = {"eq", "in", "gt", "gte", "lt", "lte", "between"}
-TIME_GRAINS = {"day", "week", "month"}
+TIME_GRAINS = {"day", "week", "month", "quarter", "year"}
 EXECUTION_MODES = {"plan_only", "execute"}
 
 
@@ -20,6 +21,8 @@ class MetricFilter:
     value: Any
 
     def __post_init__(self) -> None:
+        if isinstance(self.value, str) and "已脱敏" in self.value:
+            raise ValueError("筛选值已脱敏，请重新输入后再生成查询。")
         if self.operator not in FILTER_OPERATORS:
             raise ValueError(f"不支持的筛选操作：{self.operator}")
 
@@ -38,10 +41,17 @@ class MetricRequest:
     time_grain: str = "day"
     limit: int = 1000
     execution_mode: str = "execute"
+    sort: list[dict[str, str]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.metrics:
             raise ValueError("MetricRequest 至少需要一个指标。")
+        allowed = set(self.metrics) | set(self.dimensions) | ({self.date_dimension} if self.date_dimension else set())
+        if not isinstance(self.sort, list):
+            raise ValueError("sort 必须是结构化排序列表。")
+        for item in self.sort:
+            if not isinstance(item, dict) or set(item) != {"field", "direction"} or item["field"] not in allowed or item["direction"] not in {"asc", "desc"}:
+                raise ValueError("排序字段必须为请求的输出指标/维度，方向仅允许asc或desc。")
         if self.time_grain not in TIME_GRAINS:
             raise ValueError("time_grain 必须为 day、week 或 month。")
         if self.execution_mode not in EXECUTION_MODES:
@@ -62,6 +72,7 @@ class MetricRequest:
             time_grain=str(values.get("time_grain", "day")),
             limit=int(values.get("limit", 1000)),
             execution_mode=str(values.get("execution_mode", "execute")),
+            sort=values.get("sort", []),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -75,6 +86,7 @@ class MetricRequest:
             "time_grain": self.time_grain,
             "limit": self.limit,
             "execution_mode": self.execution_mode,
+            "sort": [dict(item) for item in self.sort],
         }
 
 
@@ -96,11 +108,23 @@ class QueryPlan:
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
+    model_fingerprint: str = ""
+    data_fingerprint: str | None = None
+    compiler_version: str = "0.1.0"
+    sql_policy_version: str = SQL_POLICY_VERSION
+    entity_keys: dict[str, str] = field(default_factory=dict)
+    _binding_fingerprint: str = field(default="", repr=False)
+
     def to_dict(self) -> dict[str, Any]:
         return {
+            "model_fingerprint": self.model_fingerprint,
+            "data_fingerprint": self.data_fingerprint,
+            "compiler_version": self.compiler_version,
+            "sql_policy_version": self.sql_policy_version,
+            "entity_keys": dict(self.entity_keys),
             "plan_id": self.plan_id,
             "semantic_model_id": self.semantic_model_id,
-            "request": self.request.to_dict(),
+            "request": _safe_request(self.request.to_dict()),
             "base_entity": self.base_entity,
             "metric_dependencies": {key: list(value) for key, value in self.metric_dependencies.items()},
             "required_entities": list(self.required_entities),
@@ -115,3 +139,8 @@ class QueryPlan:
             "warnings": list(self.warnings),
             "errors": list(self.errors),
         }
+
+
+def _safe_request(request):
+    from insightpilot.reports.manifest import sanitize_manifest_value
+    return sanitize_manifest_value(request)

@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+from insightpilot.reports.definitions import bind_report_metadata, definition_cards
+from insightpilot.analysis.quality import QUALITY_NOTICE, quality_rows
+
 import json
 import re
 from io import BytesIO
 from typing import Any
+
+from insightpilot.reports.safety import report_result_view
 
 import pandas as pd
 
 from insightpilot.reports.manifest import RunManifest
 from insightpilot.ui.formatters import format_enum_value, format_metric_name, format_metric_text, format_reviewer_check_name, format_status
 from insightpilot.ui.presenters import present_query_plan
+from insightpilot.ui.table_labels import COLUMN_NAMES, localize_result_value
+from insightpilot.reports.safety import spreadsheet_cell
 
 
 MAX_EXCEL_RESULT_ROWS = 100_000
@@ -43,11 +50,17 @@ def _localized_result_frame(frame: pd.DataFrame) -> pd.DataFrame:
     for column in ("claim", "finding"):
         if column in localized.columns:
             localized[column] = localized[column].map(format_metric_text)
-    return localized
+    for column in localized.columns:
+        localized[column] = localized[column].map(lambda value: localize_result_value(value, column))
+    return localized.rename(columns={column: COLUMN_NAMES.get(str(column), str(column)) for column in localized.columns})
 
 
-def generate_excel_report(result: dict[str, Any], manifest: RunManifest) -> bytes:
+def generate_excel_report(result: dict[str, Any], manifest: RunManifest, *, compatibility_mode: bool = False) -> bytes:
     """Generate an XLSX workbook without writing it to disk."""
+
+    result = bind_report_metadata(result, manifest)
+    quality = quality_rows(result)
+    result = report_result_view(result, max_table_rows=MAX_EXCEL_RESULT_ROWS)
 
     buffer = BytesIO()
     used: set[str] = set()
@@ -107,6 +120,10 @@ def generate_excel_report(result: dict[str, Any], manifest: RunManifest) -> byte
             "分析目标": format_enum_value("goal_mode", manifest.goal_mode),
             "运行编号": manifest.run_id,
         }).rename(columns={"key": "项目", "value": "内容"}).to_excel(writer, sheet_name=_sheet_name("执行摘要", used), index=False)
+        cards = definition_cards(result)
+        pd.DataFrame(cards or [{"说明": "本次运行没有完整口径卡，请复核原映射。"}]).to_excel(writer, sheet_name=_sheet_name("指标口径", used), index=False)
+        pd.DataFrame(quality).to_excel(writer, sheet_name=_sheet_name("质量维度", used), index=False)
+        _key_value_frame({"评分边界": QUALITY_NOTICE}).rename(columns={"key": "项目", "value": "内容"}).to_excel(writer, sheet_name=_sheet_name("评分说明", used), index=False)
         structured_sheet_names = {
             "experiment_comparison": "实验分析结果",
             "metric_comparisons": "指标对比",
@@ -143,19 +160,37 @@ def generate_excel_report(result: dict[str, Any], manifest: RunManifest) -> byte
         if result.get("lineage"):
             _key_value_frame(result["lineage"]).to_excel(writer, sheet_name=_sheet_name("数据血缘", used), index=False)
         _key_value_frame(manifest.to_dict()).rename(columns={"key": "配置项", "value": "配置值"}).to_excel(writer, sheet_name=_sheet_name("运行清单", used), index=False)
-        # English aliases remain for v0.5 workbook consumers.
-        _key_value_frame(summary).to_excel(writer, sheet_name=_sheet_name("Summary", used), index=False)
-        findings.to_excel(writer, sheet_name=_sheet_name("Findings", used), index=False)
-        pd.DataFrame(reviewer_rows).to_excel(writer, sheet_name=_sheet_name("Reviewer", used), index=False)
-        _key_value_frame(manifest.column_mapping).to_excel(writer, sheet_name=_sheet_name("Mapping", used), index=False)
-        _key_value_frame(manifest.to_dict()).to_excel(writer, sheet_name=_sheet_name("Manifest", used), index=False)
+        # Explicit opt-in retains historical English-sheet consumers.
+        if compatibility_mode:
+            _key_value_frame(summary).to_excel(writer, sheet_name=_sheet_name("Summary", used), index=False)
+            findings.to_excel(writer, sheet_name=_sheet_name("Findings", used), index=False)
+            pd.DataFrame(reviewer_rows).to_excel(writer, sheet_name=_sheet_name("Reviewer", used), index=False)
+            _key_value_frame(manifest.column_mapping).to_excel(writer, sheet_name=_sheet_name("Mapping", used), index=False)
+            _key_value_frame(manifest.to_dict()).to_excel(writer, sheet_name=_sheet_name("Manifest", used), index=False)
         result_tables = result.get("result_tables") if isinstance(result.get("result_tables"), dict) else {}
         for name, frame in result_tables.items():
             if isinstance(frame, pd.DataFrame):
-                frame.head(MAX_EXCEL_RESULT_ROWS).to_excel(
-                    writer, sheet_name=_sheet_name(f"结果_{name}", used), index=False
-                )
-                frame.head(MAX_EXCEL_RESULT_ROWS).to_excel(
-                    writer, sheet_name=_sheet_name(f"Result_{name}", used), index=False
-                )
+                if name not in structured_sheet_names:
+                    _localized_result_frame(frame.head(MAX_EXCEL_RESULT_ROWS)).to_excel(
+                        writer, sheet_name=_sheet_name(f"结果_{name}", used), index=False
+                    )
+                if compatibility_mode:
+                    frame.head(MAX_EXCEL_RESULT_ROWS).to_excel(
+                        writer, sheet_name=_sheet_name(f"Result_{name}", used), index=False
+                    )
+        truncations = [{"结果表": name, "原始行数": result["_report_table_row_counts"][name], "导出行数": MAX_EXCEL_RESULT_ROWS}
+                       for name, frame in result_tables.items()
+                       if isinstance(frame, pd.DataFrame) and result["_report_table_row_counts"][name] > MAX_EXCEL_RESULT_ROWS]
+        if truncations:
+            pd.DataFrame(truncations).to_excel(writer, sheet_name=_sheet_name("截断说明", used), index=False)
+        # openpyxl interprets '=' as a formula, so set output-only safety before serializing.
+        for sheet in writer.book.worksheets:
+            sheet.freeze_panes = "A2"
+            sheet.auto_filter.ref = sheet.dimensions
+            for row in sheet.iter_rows():
+                for cell in row:
+                    safe = spreadsheet_cell(cell.value)
+                    if safe != cell.value:
+                        cell.value = safe
+                        cell.data_type = "s"
     return buffer.getvalue()

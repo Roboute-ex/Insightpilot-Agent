@@ -1,0 +1,92 @@
+{
+  "01-home-1440x900.png": {
+    "bbox": [
+      350,
+      110,
+      1380,
+      898
+    ],
+    "sha256": "5a2243aba07f0af83a0db09bbe6a11f1ff41b6abc86f46e919a4839fb9bbc204",
+    "source": "reports/workbench/browser-final-all-20260930-114015987/01-home-1440x900.png"
+  },
+  "02-methods-1440x900.png": {
+    "bbox": [
+      350,
+      110,
+      1380,
+      898
+    ],
+    "sha256": "2c16721f0c7fbdbf2fcad30678a47a50fae9ffddeb0bc27ba4e77c046587f839",
+    "source": "reports/workbench/browser-final-all-20260930-114015987/02-methods-1440x900.png"
+  },
+  "04-order-result-1440x900.png": {
+    "bbox": [
+      350,
+      365,
+      1380,
+      837
+    ],
+    "sha256": "c4b71297e571823e082524267415847d01cb25387caadafdd6c38ceb72e641ad",
+    "source": "reports/workbench/browser-final-all-20260930-114015987/04-order-result-1440x900.png"
+  },
+  "06-causal-ready-1920x1080.png": {
+    "bbox": [
+      360,
+      575,
+      980,
+      1080
+    ],
+    "sha256": "a838ef7e36fb31158d44b8c346689cb9c3d166dafa0d0c1526d99a029e3a1093",
+    "source": "reports/workbench/browser-final-all-20260930-114015987/06-causal-ready-1920x1080.png"
+  },
+  "07-causal-result.png": {
+    "bbox": [
+      350,
+      359,
+      1380,
+      610
+    ],
+    "sha256": "0c28b5fc6c162a2efaec854f676470eda363cc52b602e01e42f11c93b352d4d0",
+    "source": "reports/workbench/browser-final-all-20260930-114015987/07-causal-result.png"
+  },
+  "09-fields.png": {
+    "bbox": [
+      350,
+      374,
+      1380,
+      889
+    ],
+    "sha256": "05d7f22111109aa5d658e4cf360fb078b25759d0e82a07b8a0a5aa992a7efdf3",
+    "source": "reports/workbench/browser-final-all-20260930-114015987/09-fields.png"
+  },
+  "10-pivot-sum-1440x900.png": {
+    "bbox": [
+      350,
+      460,
+      1380,
+      752
+    ],
+    "sha256": "51b4ec9c92c99fbacac0a8d61bd4807f540fb7bbf9d4c99c474173099948cf83",
+    "source": "reports/workbench/browser-final-all-20260930-114015987/10-pivot-sum-1440x900.png"
+  },
+  "05c-history-released.png": {
+    "bbox": [
+      350,
+      263,
+      1380,
+      680
+    ],
+    "sha256": "31c42185a3048b0f5a7481662712773fd3cdb8fcbb75c8cf9b92b5fb5f49d944",
+    "source": "reports/workbench/browser-final-all-20260930-114015987/05c-history-released.png"
+  },
+  "08-causal-exports.png": {
+    "bbox": [
+      350,
+      299,
+      1380,
+      649
+    ],
+    "sha256": "cbf6e2e868bb6b2da43d2d78b8c386405cf28e87c1fed1eb4e52b4d198747e26",
+    "source": "reports/workbench/browser-final-all-20260930-114015987/08-causal-exports.png"
+  }
+}

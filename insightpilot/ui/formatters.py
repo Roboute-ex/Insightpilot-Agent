@@ -152,6 +152,8 @@ CHART_TYPE_DISPLAY_NAMES = {
     "box": "箱线图",
     "missingness_bar": "缺失率图",
     "confidence_interval": "置信区间图",
+    "funnel": "漏斗图",
+    "heatmap": "留存热图",
     "table": "结果表",
 }
 JOIN_RISK_DISPLAY_NAMES = {
@@ -189,7 +191,7 @@ METRIC_DISPLAY_NAMES = {
     "total_revenue": "总金额",
     "impressions": "曝光量",
     "clicks": "点击量",
-    "visitors": "访问用户数",
+    "visitors": "访问次数",
     "active_users": "活跃用户数",
     "ctr": "点击率",
     "conversion_rate": "转化率",

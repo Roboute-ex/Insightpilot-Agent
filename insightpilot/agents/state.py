@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import fields, dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
@@ -57,6 +57,11 @@ class WorkflowState:
     intent: str = "general_summary"
     selected_metrics: list[str] = field(default_factory=list)
     analysis_plan: dict[str, Any] = field(default_factory=dict)
+    planning_status: str = "ready"
+    clarification: dict[str, Any] = field(default_factory=dict)
+    metric_definitions: list[dict[str, Any]] = field(default_factory=list)
+    semantic_fingerprint: str = ""
+    presentation_fingerprint: str = ""
     tables_available: list[str] = field(default_factory=list)
     executed_queries: list[dict[str, Any]] = field(default_factory=list)
     intermediate_results: dict[str, Any] = field(default_factory=dict)
@@ -83,6 +88,12 @@ class WorkflowState:
     query_plan: dict[str, Any] = field(default_factory=dict)
     plan_review: dict[str, Any] = field(default_factory=dict)
     execution_mode: str = "execute"
+    presentation_mode: str = "eager"
+    dataset_fingerprints: dict[str, str] = field(default_factory=dict)
+    _input_fingerprint_objects: dict[int,str] = field(default_factory=dict,repr=False)
+    dataset_prepared: bool = False
+    dataset_id: str = ""
+    dataset_revision: str = ""
     contract_results: list[dict[str, Any]] = field(default_factory=list)
     lineage: dict[str, Any] = field(default_factory=dict)
     telemetry: dict[str, Any] = field(default_factory=dict)
@@ -99,7 +110,7 @@ class WorkflowState:
             self.route_taken.append(node_name)
 
     def to_dict(self) -> dict[str, Any]:
-        return _json_safe(asdict(self))
+        return _json_safe({item.name: getattr(self, item.name) for item in fields(self) if not item.name.startswith("_")})
 
     @classmethod
     def from_partial(cls, values: dict[str, Any] | None = None) -> "WorkflowState":

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from insightpilot.performance_tasks import cancellation_checkpoint
+
 import pandas as pd
 from pandas.api.types import is_datetime64_any_dtype, is_numeric_dtype
 
 
 def _has_date_like_column(df: pd.DataFrame) -> bool:
     for column in df.columns:
+        cancellation_checkpoint()
         lowered = str(column).lower()
         if any(token in lowered for token in ("date", "day", "time", "日期", "时间")):
             return True
@@ -19,6 +22,7 @@ def _has_date_like_column(df: pd.DataFrame) -> bool:
 def validate_dataframe_for_analysis(df: pd.DataFrame) -> list[str]:
     """Return non-blocking warnings for a DataFrame."""
 
+    cancellation_checkpoint()
     warnings: list[str] = []
     if df.empty:
         warnings.append("DataFrame 为空，无法生成可靠分析。")
@@ -46,6 +50,7 @@ def validate_dataframe_for_analysis(df: pd.DataFrame) -> list[str]:
         warnings.append(f"存在高缺失率字段：{', '.join(high_missing[:5])}。")
     high_cardinality: list[str] = []
     for column in df.columns:
+        cancellation_checkpoint()
         series = df[column]
         if not (
             pd.api.types.is_object_dtype(series)
@@ -65,8 +70,10 @@ def validate_tables_for_workflow(tables: dict[str, pd.DataFrame]) -> list[str]:
 
     if not tables:
         return ["没有可用表，workflow 无法执行分析。"]
+    cancellation_checkpoint()
     warnings: list[str] = []
     for name, df in tables.items():
+        cancellation_checkpoint()
         for warning in validate_dataframe_for_analysis(df):
             warnings.append(f"{name}: {warning}")
     return warnings

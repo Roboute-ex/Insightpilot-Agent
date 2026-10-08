@@ -1,6 +1,6 @@
 # Database Connection
 
-v0.3 的 database ingestion 使用 SQLAlchemy 和 pandas，只执行只读查询。默认支持 SQLite；其他数据库需要用户自行安装对应 SQLAlchemy 驱动。
+当前整合版 的 database ingestion 使用 SQLAlchemy 和 pandas，只执行只读查询。默认支持 SQLite；其他数据库需要用户自行安装对应 SQLAlchemy 驱动。
 
 ## SQLite 示例
 

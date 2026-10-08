@@ -1,12 +1,12 @@
 # Analysis Playbooks
 
-v0.5 将自定义数据工作流组织为可复用的 Analysis Playbook。Playbook 是确定性配置，不调用在线模型，也不接收可执行 SQL 片段。
+当前整合版 将自定义数据工作流组织为可复用的 Analysis Playbook。Playbook 是确定性配置，不调用在线模型，也不接收可执行 SQL 片段。
 
 ## 核心概念
 
 每个 playbook 声明 `playbook_id`、中文名称、支持的 goal mode、Column Mapping 要求、参数、执行器、图表类型和输出章节。`PlaybookRegistry` 负责注册、筛选和确定性推荐。
 
-不传 `playbook_id` 时保留 v0.4 自动工作流。选择 `auto` 时，系统根据 goal mode、mapping 完整度和字段角色排序推荐结果。
+不传 `playbook_id` 时保留 当前整合版 自动工作流。选择 `auto` 时，系统根据 goal mode、mapping 完整度和字段角色排序推荐结果。
 
 ## 七个内置 Playbook
 

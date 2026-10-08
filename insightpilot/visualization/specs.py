@@ -18,6 +18,8 @@ SUPPORTED_CHART_TYPES = {
     "missingness_bar",
     "confidence_interval",
     "table",
+    "funnel",
+    "heatmap",
 }
 
 

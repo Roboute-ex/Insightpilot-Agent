@@ -1,0 +1,5 @@
+row_group,column_group,amount,entity_id,numerator,denominator
+甲,X,10,u1,9,90
+甲,Y,30,u2,1,2
+乙,X,20,u1,0,0
+乙,Y,60,u3,0,0

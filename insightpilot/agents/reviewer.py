@@ -72,6 +72,9 @@ def _has_causal_caveat(text: str) -> bool:
 def review_analysis(trace: AnalysisTrace) -> ReviewerResult:
     """Review whether the analysis trace contains required safeguards."""
 
+    execution_status = trace.analysis_result_summary.get("execution_status")
+    if execution_status in {"PREVIEW", "WAITING_APPROVAL", "NEEDS_INPUT", "FAILED"}:
+        return ReviewerResult("FAIL" if execution_status == "FAILED" else "WARN", 0, {"analysis_executed": False}, ["当前执行状态为 " + execution_status + "，未通过实际分析质量验收。"], ["补齐输入或完成方案审批后重新执行。"])
     text = _combined_text(trace)
     playbook_selected = bool(trace.selected_playbook_id)
     playbook_result = trace.playbook_result_summary if isinstance(trace.playbook_result_summary, dict) else {}
@@ -148,10 +151,10 @@ def review_analysis(trace: AnalysisTrace) -> ReviewerResult:
     if trace.mapping_warnings and "mapping" not in text and "字段" not in text:
         checks["mapping_warnings_reported"] = False
 
-    is_experiment = trace.goal_mode == "experiment_analysis" or trace.identified_intent == "experiment_analysis"
+    is_experiment = trace.selected_playbook_id == "experiment_comparison" or not trace.selected_playbook_id and (trace.goal_mode == "experiment_analysis" or trace.identified_intent == "experiment_analysis")
     if is_experiment:
         checks["experiment_has_p_value_when_needed"] = (
-            "p_value" in text and ("sample_size" in text or "样本" in text or "sample" in text)
+            bool(trace.analysis_result_summary.get("experiment_results"))
         )
 
     is_causal = trace.goal_mode == "causal_exploration" or trace.identified_intent == "causal_exploration"

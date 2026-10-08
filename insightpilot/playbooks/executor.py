@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from insightpilot.performance_tasks import cancellation_checkpoint
+
 from statistics import NormalDist
 from typing import Any, Callable
 
@@ -10,6 +12,7 @@ import pandas as pd
 
 from insightpilot.analysis.causal_light import estimate_adjusted_effect
 from insightpilot.analysis.experiments import analyze_ab_test
+from insightpilot.metrics.aggregation import metric_components
 from insightpilot.ingestion.mapping import ColumnMapping, normalize_column_mapping, suggest_column_mapping
 from insightpilot.playbooks.models import AnalysisPlaybook, PlaybookExecutionResult
 from insightpilot.playbooks.registry import get_playbook_registry
@@ -24,7 +27,7 @@ from insightpilot.playbooks.sql_templates import (
 from insightpilot.playbooks.validation import validate_playbook_parameters
 from insightpilot.semantic.catalog import load_builtin_catalog
 from insightpilot.semantic.compiler import MetricCompiler, execute_query_plan
-from insightpilot.semantic.query import MetricRequest
+from insightpilot.semantic.query import MetricRequest, MetricFilter
 from insightpilot.tools.duckdb_engine import AnalyticsEngine
 from insightpilot.visualization.specs import ChartSpec
 
@@ -293,11 +296,13 @@ def _execute_metric_trend(
     if not trend.empty:
         trend["period"] = pd.to_datetime(trend["period"], errors="coerce")
         for metric in metrics:
+            cancellation_checkpoint()
             values = pd.to_numeric(trend[metric], errors="coerce")
             trend[f"{metric}_change_rate"] = values.pct_change()
             trend[f"{metric}_rolling_average"] = values.rolling(rolling_window, min_periods=1).mean()
-            rolling_std = values.rolling(rolling_window, min_periods=2).std().replace(0, np.nan)
-            trend[f"{metric}_anomaly"] = ((values - trend[f"{metric}_rolling_average"]).abs() / rolling_std >= threshold).fillna(False)
+            baseline = values.shift(1).rolling(rolling_window, min_periods=2).mean()
+            rolling_std = values.shift(1).rolling(rolling_window, min_periods=2).std().replace(0, np.nan)
+            trend[f"{metric}_anomaly"] = ((values - baseline).abs() / rolling_std >= threshold).fillna(False)
             latest = values.dropna().iloc[-1] if values.notna().any() else float("nan")
             findings.append(f"{metric} 最新聚合值为 {latest:.4f}，检测到 {int(trend[f'{metric}_anomaly'].sum())} 个候选异常点。")
     else:
@@ -344,7 +349,11 @@ def _execute_period_comparison(
         previous_start, previous_end, dimension, str(parameters.get("aggregation", "sum")),
     )
     comparison = _run_template(engine, template, "period_comparison", executed, warnings)
-    summary = comparison.groupby("comparison_period", as_index=False)["metric_value"].sum() if not comparison.empty else pd.DataFrame()
+    if metric_components(metric, df.columns) and not comparison.empty:
+        total_template = build_period_comparison_query(mapping.table_name or "", mapping.date_column or "", metric, _allowlist(tables, mapping.table_name or ""), current_start, current_end, previous_start, previous_end, None, str(parameters.get("aggregation", "sum")))
+        summary = _run_template(engine, total_template, "period_summary", executed, warnings)
+    else:
+        summary = comparison.groupby("comparison_period", as_index=False)["metric_value"].sum() if not comparison.empty else pd.DataFrame()
     findings: list[str] = []
     if not summary.empty and {"current", "previous"}.issubset(set(summary["comparison_period"])):
         values = summary.set_index("comparison_period")["metric_value"]
@@ -381,7 +390,10 @@ def _execute_dimension_contribution(
         mapping.table_name or "", dimension, metric, _allowlist(tables, mapping.table_name or ""), aggregation, top_n
     )
     contribution = _run_template(engine, template, "dimension_contribution", executed, warnings)
-    if not contribution.empty:
+    ratio_comparison = metric_components(metric, df.columns) is not None or metric.endswith("_rate") or metric in {"ctr", "cvr"}
+    if ratio_comparison:
+        warnings.append("比率仅展示各组加权值，不将比率相加或声明可加总贡献。")
+    if not contribution.empty and not ratio_comparison:
         denominator = float(contribution["metric_value"].abs().sum())
         contribution["contribution_share"] = contribution["metric_value"].abs() / denominator if denominator else 0.0
         contribution["rank"] = range(1, len(contribution) + 1)
@@ -423,55 +435,33 @@ def _execute_experiment_comparison(
         _allowlist(tables, mapping.table_name or ""), control, treatment,
     )
     summary = _run_template(engine, template, "experiment_summary", executed, warnings)
-    working = df[df[mapping.group_column].isin([control, treatment])][[mapping.group_column, metric]].copy()
+    working = df[df[mapping.group_column].isin([control, treatment])].copy()
     working[mapping.group_column] = working[mapping.group_column].map({control: "control", treatment: "treatment"})
     result_tables: dict[str, pd.DataFrame] = {"experiment_summary": summary}
     findings: list[str] = []
     try:
-        analysis = analyze_ab_test(working, mapping.group_column or "", metric, str(parameters.get("metric_type", "mean")))
         confidence = float(parameters.get("confidence_level", 0.95))
-        z_value = NormalDist().inv_cdf(0.5 + confidence / 2)
-        control_values = pd.to_numeric(
-            working.loc[working[mapping.group_column] == "control", metric], errors="coerce"
-        ).dropna()
-        treatment_values = pd.to_numeric(
-            working.loc[working[mapping.group_column] == "treatment", metric], errors="coerce"
-        ).dropna()
-        if str(parameters.get("metric_type", "mean")) == "proportion":
-            standard_error_lift = float(
-                np.sqrt(
-                    treatment_values.mean() * (1 - treatment_values.mean()) / len(treatment_values)
-                    + control_values.mean() * (1 - control_values.mean()) / len(control_values)
-                )
-            )
-        else:
-            standard_error_lift = float(
-                np.sqrt(
-                    treatment_values.var(ddof=1) / len(treatment_values)
-                    + control_values.var(ddof=1) / len(control_values)
-                )
-            )
-        absolute_lift = float(analysis["absolute_lift"])
-        analysis["confidence_level"] = confidence
-        analysis["confidence_interval"] = (
-            absolute_lift - z_value * standard_error_lift,
-            absolute_lift + z_value * standard_error_lift,
-        )
-        if not summary.empty and "metric_std" in summary.columns:
-            standard_error = pd.to_numeric(summary["metric_std"], errors="coerce") / np.sqrt(pd.to_numeric(summary["sample_size"], errors="coerce"))
-            summary["ci_lower"] = summary["metric_mean"] - z_value * standard_error
-            summary["ci_upper"] = summary["metric_mean"] + z_value * standard_error
+        analysis = analyze_ab_test(working, mapping.group_column or "", metric, str(parameters.get("metric_type", "mean")), confidence_level=confidence, statistical_unit=parameters.get("statistical_unit") or mapping.statistical_unit)
+        warnings.extend(analysis["limitations"][1:])
+        independent = working.copy()
+        unit = analysis["randomization_unit"]
+        if unit:
+            independent = independent.groupby([unit, mapping.group_column], as_index=False)[metric].mean()
+        summary = independent.groupby(mapping.group_column)[metric].agg(sample_size="count", metric_mean="mean", metric_std="std").reset_index().rename(columns={mapping.group_column: "group_value"})
+        result_tables["experiment_summary"] = summary
         result_tables["experiment_statistics"] = pd.DataFrame([analysis])
+        relative_text = f"{analysis['relative_lift']:.2%}" if analysis["relative_lift"] is not None else "不可计算（对照均值为零）"
         findings = [
-            f"实验组相对对照组 lift 为 {float(analysis['relative_lift']):.2%}。",
-            f"p-value={float(analysis['p_value']):.6f}，样本量={analysis['sample_size']}。",
+            f"实验组相对对照组 lift 为 {relative_text}。",
+            f"p-value={float(analysis['p_value']):.3g}，样本量={analysis['sample_size']}。",
             str(analysis["conclusion"]),
         ]
         dimension = parameters.get("dimension")
         if dimension:
             stratified_rows: list[dict[str, Any]] = []
             for value, subset in df.groupby(str(dimension), dropna=False):
-                stratum = subset[subset[mapping.group_column].isin([control, treatment])][[mapping.group_column, metric]].copy()
+                cancellation_checkpoint()
+                stratum = subset[subset[mapping.group_column].isin([control, treatment])].copy()
                 stratum[mapping.group_column] = stratum[mapping.group_column].map({control: "control", treatment: "treatment"})
                 try:
                     stratum_result = analyze_ab_test(
@@ -479,6 +469,8 @@ def _execute_experiment_comparison(
                         mapping.group_column or "",
                         metric,
                         str(parameters.get("metric_type", "mean")),
+                        confidence_level=confidence,
+                        statistical_unit=parameters.get("statistical_unit") or mapping.statistical_unit,
                     )
                 except Exception:
                     continue
@@ -549,7 +541,9 @@ def _execute_causal_exploration(
         except Exception as exc:
             warnings.append(f"轻量因果估计失败：{exc}")
     result_tables["adjusted_effect_summary"] = pd.DataFrame([summary_row])
-    specs = [ChartSpec("adjusted_effect", "bar", "调整效应摘要", "adjusted_effect_summary", x=None, y=["naive_difference", "adjusted_effect", "propensity_weighted_effect"], description="对比未调整与轻量调整估计。")]
+    computed_estimates = [name for name in ("naive_difference", "adjusted_effect") if pd.notna(summary_row.get(name))]
+    specs = [ChartSpec("adjusted_effect", "grouped_bar", "原始差与调整估计", "adjusted_effect_summary", x=None,
+        y=computed_estimates, description="并列展示实际原始均值差和已计算的回归调整估计；二者不可相加。未执行倾向评分加权。")]
     return PlaybookExecutionResult(
         playbook.playbook_id, playbook.display_name, "WARN" if warnings else "PASS", parameters,
         findings, [BASE_CAVEAT, CAUSAL_CAVEAT], result_tables,
@@ -603,6 +597,7 @@ def _execute_periodic_summary(
         metric_summary_rows: list[dict[str, Any]] = []
         source = tables[mapping.table_name or ""]
         for metric in mapping.metric_columns:
+            cancellation_checkpoint()
             values = pd.to_numeric(source[metric], errors="coerce").dropna()
             if not values.empty:
                 metric_summary_rows.append(
@@ -617,6 +612,7 @@ def _execute_periodic_summary(
         if metric_summary_rows:
             result_tables["metric_summary"] = pd.DataFrame(metric_summary_rows)
     for part in parts:
+        cancellation_checkpoint()
         prefix = part.playbook_id
         findings.extend(part.findings)
         warnings.extend(part.warnings)
@@ -671,23 +667,27 @@ def _execute_semantic_metric_query(
 ) -> PlaybookExecutionResult:
     catalog = load_builtin_catalog()
     model = catalog.get(str(parameters.get("semantic_model_id") or "commerce_demo"))
-    metric = str(parameters.get("metric") or "total_revenue")
+    raw_metrics = parameters.get("metrics") or [str(parameters.get("metric") or "total_revenue")]
+    metrics = [item.strip() for item in raw_metrics.split(",") if item.strip()] if isinstance(raw_metrics, str) else [str(item) for item in raw_metrics]
+    metric = metrics[0]
     raw_dimensions = parameters.get("dimensions") or []
     dimensions = [item.strip() for item in raw_dimensions.split(",") if item.strip()] if isinstance(raw_dimensions, str) else [str(item) for item in raw_dimensions]
     date_dimension = parameters.get("date_dimension") or None
     if date_dimension and str(date_dimension) not in dimensions:
         dimensions.insert(0, str(date_dimension))
     request = MetricRequest(
-        metrics=[metric],
+        metrics=metrics,
         dimensions=dimensions,
+        filters=[item if isinstance(item, MetricFilter) else MetricFilter(**item) for item in parameters.get("filters", [])],
         date_dimension=str(date_dimension) if date_dimension else None,
         date_from=str(parameters["date_from"]) if parameters.get("date_from") else None,
         date_to=str(parameters["date_to"]) if parameters.get("date_to") else None,
         time_grain=str(parameters.get("time_grain") or "day"),
         limit=int(parameters.get("limit") or 1000),
         execution_mode=str(parameters.get("execution_mode") or "execute"),
+        sort=parameters.get("sort", []),
     )
-    plan = MetricCompiler(model).compile(request)
+    plan = MetricCompiler(model).compile(request, tables=tables)
     frame, review = execute_query_plan(
         plan,
         tables,
@@ -700,7 +700,7 @@ def _execute_semantic_metric_query(
         f"计划使用 {len(plan.required_entities)} 个实体、{len(plan.join_plan.steps)} 个连接步骤，风险等级为 {plan.risk_level}。",
     ]
     caveats = [*playbook.caveats_zh, BASE_CAVEAT]
-    warnings = [*plan.warnings]
+    warnings = [*plan.warnings, *plan.errors]
     executed_queries: list[dict[str, Any]] = []
     if frame is not None:
         result_tables["semantic_metric_result"] = frame
@@ -767,63 +767,43 @@ def _execute_funnel_analysis(
     tables: dict[str, pd.DataFrame],
     parameters: dict[str, Any],
 ) -> PlaybookExecutionResult:
-    required_columns = {"session_date", "visited", "viewed_product", "added_to_cart", "submitted_order", "paid"}
-    missing = sorted(required_columns - set(tables["sessions"].columns))
+    required_columns = {"session_id", "event_name", "event_time"}
+    if "events" not in tables or not required_columns.issubset(tables["events"].columns):
+        return _multi_table_failure(playbook, parameters, ["漏斗需要 events 的 session_id、event_name、event_time；不能从订单记录编造购物车事件。"])
+    events = tables["events"].copy()
+    events["event_time"] = pd.to_datetime(events["event_time"], errors="coerce")
+    if events["event_time"].isna().any() or events["session_id"].isna().any():
+        return _multi_table_failure(playbook, parameters, ["漏斗事件时间或实体字段包含空值/无效时间。"])
+    window = int(parameters.get("window_minutes", 1440))
+    if not 1 <= window <= 43200:
+        return _multi_table_failure(playbook, parameters, ["漏斗观察窗口必须在1到43200分钟之间。"])
+    stages = [("visit", "访问"), ("view", "浏览商品"), ("cart", "加入购物车"), ("submit", "提交订单"), ("paid", "支付完成")]
+    missing = {name for name, _ in stages} - set(events["event_name"])
     if missing:
-        return _multi_table_failure(playbook, parameters, ["sessions 缺少漏斗字段：" + ", ".join(missing)])
-    where: list[str] = []
-    bound: list[Any] = []
+        return _multi_table_failure(playbook, parameters, ["缺少必要事件类型：" + ", ".join(sorted(missing)) + "；请确认埋点覆盖后重试。"])
+    start = events.loc[events["event_name"] == "visit"].groupby("session_id")["event_time"].min().rename("start_time").reset_index()
     if parameters.get("date_from"):
-        where.append('"session_date" >= ?')
-        bound.append(parameters["date_from"])
+        start = start[start["start_time"] >= pd.Timestamp(parameters["date_from"])]
     if parameters.get("date_to"):
-        where.append('"session_date" <= ?')
-        bound.append(parameters["date_to"])
-    query = (
-        'SELECT SUM("visited") AS visit_count, SUM("viewed_product") AS view_count, '
-        'SUM("added_to_cart") AS cart_count, SUM("submitted_order") AS submit_count, '
-        'SUM("paid") AS paid_count FROM "sessions"'
-    )
-    if where:
-        query += " WHERE " + " AND ".join(where)
-    engine = AnalyticsEngine()
-    engine.register_tables(tables)
-    values = engine.run_parameterized_sql(query, bound).iloc[0]
-    stages = [
-        ("visit", "访问", int(values["visit_count"] or 0)),
-        ("view", "浏览商品", int(values["view_count"] or 0)),
-        ("cart", "加入购物车", int(values["cart_count"] or 0)),
-        ("submit", "提交订单", int(values["submit_count"] or 0)),
-        ("paid", "支付完成", int(values["paid_count"] or 0)),
-    ]
-    first = max(stages[0][2], 1)
-    rows: list[dict[str, Any]] = []
-    previous = first
-    for stage_id, label, count in stages:
-        rows.append(
-            {
-                "阶段标识": stage_id,
-                "漏斗阶段": label,
-                "人数": count,
-                "相对上一步转化率": count / previous if previous else 0.0,
-                "相对访问转化率": count / first,
-            }
-        )
-        previous = count
+        start = start[start["start_time"] < pd.Timestamp(parameters["date_to"]).normalize() + pd.Timedelta(days=1)]
+    eligible = start.assign(previous_time=start["start_time"])
+    counts = [len(eligible)]
+    for name, _ in stages[1:]:
+        cancellation_checkpoint()
+        candidates = events.loc[events["event_name"] == name, ["session_id", "event_time"]].merge(eligible, on="session_id", how="inner")
+        candidates = candidates[(candidates["event_time"] >= candidates["previous_time"]) & (candidates["event_time"] <= candidates["start_time"] + pd.Timedelta(minutes=window))]
+        eligible = candidates.groupby("session_id", as_index=False).agg(start_time=("start_time", "first"), previous_time=("event_time", "min"))
+        counts.append(len(eligible))
+    rows = []
+    for index, ((name, label), count) in enumerate(zip(stages, counts)):
+        previous = counts[index - 1] if index else counts[0]
+        rows.append({"阶段标识": name, "漏斗阶段": label, "会话数": count, "统计单位": "去重session_id", "相对上一步转化率": count / previous if previous else np.nan, "相对访问转化率": count / counts[0] if counts[0] else np.nan})
     frame = pd.DataFrame(rows)
-    return PlaybookExecutionResult(
-        playbook.playbook_id,
-        playbook.display_name,
-        "PASS",
-        parameters,
-        [f"访问到支付完成的整体转化率为 {stages[-1][2] / first:.2%}。", "已按五个固定阶段生成可复核漏斗。"],
-        [*playbook.caveats_zh, BASE_CAVEAT],
-        {"funnel_summary": frame},
-        [ChartSpec("funnel_conversion", "bar", "漏斗转化", "funnel_summary", x="漏斗阶段", y=["人数"], description="各阶段模拟会话数量。").to_dict()],
-        [{"tool": "duckdb", "template_id": "funnel_analysis", "purpose": "计算固定漏斗阶段", "query": query, "status": "success", "row_count": 1, "referenced_tables": ["sessions"], "referenced_columns": sorted(required_columns)}],
-        [],
-        {"safe_query_generated": True, "multi_table": True},
-    )
+    return PlaybookExecutionResult(playbook.playbook_id, playbook.display_name, "PASS" if counts[0] else "WARN", parameters,
+        [f"按会话实体去重并验证事件顺序，访问 {counts[0]} 个会话、支付完成 {counts[-1]} 个会话，窗口 {window} 分钟。"],
+        [*playbook.caveats_zh, BASE_CAVEAT, "转化率基于同一会话内按固定阶段顺序发生的事件，不是跨单位相乘或因果推断。"],
+        {"funnel_summary": frame}, [ChartSpec("funnel_conversion", "funnel", "漏斗转化", "funnel_summary", x="漏斗阶段", y=["会话数"], description="有序且窗口内的去重会话。").to_dict()], [], [],
+        {"safe_query_generated": True, "multi_table": True, "uses_pandas_fallback": True, "statistical_unit": "session_id", "window_minutes": window})
 
 
 def _execute_cohort_retention(
@@ -841,16 +821,25 @@ def _execute_cohort_retention(
         return _multi_table_failure(playbook, parameters, ["队列留存所需字段缺失：" + ", ".join(missing)])
     customers = tables["customers"][["customer_id", "signup_date"]].copy()
     sessions = tables["sessions"][["customer_id", "session_date"]].copy()
+    if customers["customer_id"].isna().any() or customers["customer_id"].duplicated().any():
+        return _multi_table_failure(playbook, parameters, ["队列客户主键为空或重复。"])
     customers["队列日期"] = pd.to_datetime(customers["signup_date"], errors="coerce").dt.to_period("W").dt.start_time
     sessions["活动日期"] = pd.to_datetime(sessions["session_date"], errors="coerce")
-    activity = sessions.merge(customers[["customer_id", "队列日期"]], on="customer_id", how="inner")
+    if customers["队列日期"].isna().any() or sessions["活动日期"].isna().any() or sessions.empty:
+        return _multi_table_failure(playbook, parameters, ["队列或会话日期无效/为空。"])
+    reference_end = sessions["活动日期"].max().normalize() + pd.Timedelta(days=1)
+    activity = sessions.merge(customers[["customer_id", "队列日期"]], on="customer_id", how="inner", validate="many_to_one")
     activity["观察周期"] = ((activity["活动日期"] - activity["队列日期"]).dt.days // 7).astype(int)
     activity = activity[(activity["观察周期"] >= 0) & (activity["观察周期"] < periods)]
     cohort_sizes = customers.groupby("队列日期", as_index=False)["customer_id"].nunique().rename(columns={"customer_id": "队列人数"})
     retained = activity.groupby(["队列日期", "观察周期"], as_index=False)["customer_id"].nunique().rename(columns={"customer_id": "留存人数"})
-    result = retained.merge(cohort_sizes, on="队列日期", how="left")
+    grid = cohort_sizes.merge(pd.DataFrame({"观察周期": range(periods)}), how="cross")
+    result = grid.merge(retained, on=["队列日期", "观察周期"], how="left")
+    result["可观察"] = result["队列日期"] + pd.to_timedelta((result["观察周期"] + 1) * 7, unit="D") <= reference_end
+    result["留存人数"] = result["留存人数"].fillna(0).where(result["可观察"], np.nan)
     result["留存率"] = result["留存人数"] / result["队列人数"].replace(0, np.nan)
-    result = result[["队列日期", "队列人数", "观察周期", "留存人数", "留存率"]].sort_values(["队列日期", "观察周期"]).reset_index(drop=True)
+    result = result.sort_values(["队列日期", "观察周期"]).reset_index(drop=True)
+    matrix = result.pivot(index="队列日期", columns="观察周期", values="留存率").reset_index()
     return PlaybookExecutionResult(
         playbook.playbook_id,
         playbook.display_name,
@@ -858,8 +847,8 @@ def _execute_cohort_retention(
         parameters,
         [f"已生成 {result['队列日期'].nunique()} 个注册队列、最多 {periods} 个观察周期的留存结果。"],
         [*playbook.caveats_zh, BASE_CAVEAT],
-        {"cohort_retention": result},
-        [ChartSpec("cohort_retention", "line", "队列留存趋势", "cohort_retention", x="观察周期", y=["留存率"], color="队列日期", description="按注册周展示模拟客户留存率。").to_dict()],
+        {"cohort_retention": result, "cohort_retention_matrix": matrix},
+        [ChartSpec("cohort_retention", "heatmap", "队列留存趋势", "cohort_retention", x="观察周期", y=["留存率"], color="队列日期", description="按注册周展示模拟客户留存率。").to_dict()],
         [],
         [],
         {"uses_pandas_fallback": True, "safe_query_generated": True, "multi_table": True},
@@ -892,10 +881,10 @@ def _execute_multi_table_playbook(
         return _multi_table_failure(playbook, normalized, [f"多表 playbook 执行失败：{exc}"])
     result.metadata.update(
         {
-            "route_taken": EXECUTION_ROUTES,
+            "route_taken": EXECUTION_ROUTES if result.executed_queries else (["select_playbook", "validate_playbook", "validate_parameters", "execute_pandas", "build_result_tables", "build_chart_specs"] if result.result_tables else EXECUTION_ROUTES[:4]),
             "mapping_source": "semantic_model" if playbook.requirements.requires_semantic_model else "multi_table_schema",
-            "requirements_satisfied": True,
-            "parameters_valid": True,
+            "requirements_satisfied": result.status != "FAIL",
+            "parameters_valid": result.status != "FAIL",
             "result_table_names": sorted(result.result_tables),
         }
     )
@@ -922,13 +911,17 @@ def execute_playbook(
 ) -> PlaybookExecutionResult:
     """Validate and execute one built-in playbook without external services."""
 
-    del table_metadata
+    cancellation_checkpoint()
     registry = get_playbook_registry()
     playbook = registry.get(playbook_id)
     if playbook_id in MULTI_TABLE_PLAYBOOK_IDS:
         return _execute_multi_table_playbook(playbook, tables, parameters)
     mapping, df, mapping_warnings, mapping_source = _prepare_mapping(playbook_id, tables, column_mapping)
     normalized_parameters = _apply_defaults(playbook, parameters)
+    if "exploration_request" in normalized_parameters:
+        normalized_parameters["aggregation"] = mapping.aggregation
+        if playbook_id == "data_profile":
+            normalized_parameters.pop("aggregation", None)
     if df is None or not mapping.table_name:
         return _failure_result(playbook, normalized_parameters, mapping_warnings or ["没有可用数据表。"], mapping, mapping_source)
     if "metric" in normalized_parameters and not normalized_parameters.get("metric") and mapping.metric_columns:
@@ -949,6 +942,9 @@ def execute_playbook(
         validation_errors.append(
             f"当前表只有 {len(df)} 行，剧本至少需要 {playbook.requirements.minimum_rows} 行。"
         )
+    if "exploration_request" in normalized_parameters:
+        from insightpilot.analysis.exploration import validate_exploration_request
+        validation_errors.extend(validate_exploration_request(normalized_parameters["exploration_request"], mapping, list(map(str, df.columns)), (table_metadata or {}).get(mapping.table_name, {})))
     if validation_errors:
         return _failure_result(
             playbook,
@@ -959,10 +955,14 @@ def execute_playbook(
         )
 
     engine = AnalyticsEngine()
-    engine.register_tables(tables)
     executor = EXECUTORS[playbook.executor_name]
     try:
-        result = executor(playbook, tables, mapping, df, normalized_parameters, engine)
+        engine.register_tables({str(mapping.table_name):df})
+        if "exploration_request" in normalized_parameters:
+            from insightpilot.analysis.exploration import execute_exploration
+            result = execute_exploration(playbook, tables, mapping, df, normalized_parameters, engine, (table_metadata or {}).get(mapping.table_name, {}))
+        else:
+            result = executor(playbook, tables, mapping, df, normalized_parameters, engine)
     except Exception as exc:
         return _failure_result(
             playbook,
@@ -971,6 +971,8 @@ def execute_playbook(
             mapping,
             mapping_source,
         )
+    finally:
+        engine.close()
     result.warnings = list(dict.fromkeys([*mapping_warnings, *result.warnings]))
     if result.status == "PASS" and result.warnings:
         result.status = "WARN"

@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from insightpilot.performance_tasks import cancellation_checkpoint
+
 import importlib.util
 from typing import Any, Callable
 
 import pandas as pd
 
 from insightpilot.analysis.anomaly import detect_metric_anomaly
+from insightpilot.analysis.metric_diagnosis import _daily_series
+from insightpilot.metrics.aggregation import metric_components
 from insightpilot.analysis.attribution import dimension_contribution
 from insightpilot.analysis.causal_light import estimate_adjusted_effect
 from insightpilot.analysis.experiments import analyze_ab_test
@@ -28,17 +32,19 @@ from insightpilot.ingestion.mapping import (
 from insightpilot.ingestion.schema_mapper import infer_schema_mapping
 from insightpilot.ingestion.validation import validate_tables_for_workflow
 from insightpilot.metrics.dictionary import MetricDefinition
+from insightpilot.playbooks.sql_templates import metric_aggregate_sql
 from insightpilot.metrics.resolver import resolve_metrics_from_question
 from insightpilot.lineage import DatasetNode, LineageEdge, LineageGraph, OperationNode
-from insightpilot.observability import LocalTracer
-from insightpilot.planning.planner import AnalysisPlan, create_analysis_plan
+from insightpilot.observability.tracer import LocalTracer, use_tracer, trace_stage
+from insightpilot.analysis.reuse import aggregate_scope
+from insightpilot.planning.planner import AnalysisPlan, UNRESOLVED_METRIC_STEP, create_analysis_plan, prepare_analysis_request
 from insightpilot.playbooks.executor import execute_playbook
 from insightpilot.playbooks.registry import get_playbook_registry
-from insightpilot.reports.manifest import RunManifest, fingerprint_dataframe, sanitize_manifest_value
+from insightpilot.reports.manifest import CURRENT_MANIFEST_VERSION, RunManifest, fingerprint_dataframe, sanitize_manifest_value
 from insightpilot.reports.markdown import generate_markdown_report
 from insightpilot.semantic.catalog import load_builtin_catalog
 from insightpilot.semantic.relationships import RelationshipGraph
-from insightpilot.tools.duckdb_engine import AnalyticsEngine
+from insightpilot.tools.duckdb_engine import AnalyticsEngine, LazyAnalyticsEngine
 from insightpilot.visualization.factory import build_charts
 
 
@@ -69,12 +75,8 @@ def _metric_payload(metrics: list[MetricDefinition]) -> list[dict[str, object]]:
 
 def _safe_engine(tables: dict[str, pd.DataFrame]) -> AnalyticsEngine | None:
     try:
-        engine = AnalyticsEngine()
-        engine.register_tables(tables)
-        return engine
+        return LazyAnalyticsEngine(tables)
     except ImportError:
-        return None
-    except Exception:
         return None
 
 
@@ -95,7 +97,7 @@ def _to_builtin(value: Any) -> Any:
 
 def _round_value(value: Any) -> Any:
     if isinstance(value, float):
-        return round(value, 6)
+        return value
     if isinstance(value, dict):
         return {key: _round_value(item) for key, item in value.items()}
     if isinstance(value, list):
@@ -166,17 +168,9 @@ def _mapping_for_table(state: WorkflowState, table_name: str, df: pd.DataFrame) 
 def _column_mapping_from_state(state: WorkflowState) -> ColumnMapping:
     if not isinstance(state.column_mapping, dict) or not state.column_mapping:
         return ColumnMapping()
-    return ColumnMapping(
-        table_name=state.column_mapping.get("table_name"),
-        date_column=state.column_mapping.get("date_column"),
-        metric_columns=list(state.column_mapping.get("metric_columns", [])),
-        dimension_columns=list(state.column_mapping.get("dimension_columns", [])),
-        group_column=state.column_mapping.get("group_column"),
-        treatment_column=state.column_mapping.get("treatment_column"),
-        outcome_column=state.column_mapping.get("outcome_column"),
-        time_grain=state.column_mapping.get("time_grain", "day"),
-        notes=list(state.column_mapping.get("notes", [])),
-    )
+    from dataclasses import fields
+    allowed = {item.name for item in fields(ColumnMapping)}
+    return ColumnMapping(**{key: value for key, value in state.column_mapping.items() if key in allowed})
 
 
 def _select_mapping_table(
@@ -199,13 +193,18 @@ def _prepare_column_mapping_node(
     tables: dict[str, pd.DataFrame],
     engine: AnalyticsEngine | None = None,
 ) -> WorkflowState:
-    if not state.user_table_mode:
+    if not state.user_table_mode and not state.column_mapping:
         state.column_mapping = {}
         state.mapping_source = "none"
         state.mapping_warnings = []
         return state
 
     raw_mapping = state.column_mapping if isinstance(state.column_mapping, dict) and state.column_mapping else None
+    # Preflight must receive the same user request as the UI. Normalization here
+    # supplies execution defaults and provenance, but cannot turn those defaults
+    # into an additional user choice before the shared planner has resolved it.
+    from copy import deepcopy
+    state.intermediate_results["_requested_column_mapping"] = deepcopy(raw_mapping)
     requested_table = raw_mapping.get("table_name") if raw_mapping else None
     selected = _select_mapping_table(state, tables, str(requested_table) if requested_table else None)
     if selected is None:
@@ -293,12 +292,10 @@ def _record_operation(state: WorkflowState, purpose: str, operation: str, row_co
 
 
 def _daily_metric_frame(tables: dict[str, pd.DataFrame], metric: str, city_filter: str | None = None) -> pd.DataFrame:
-    daily = tables["daily_metrics"].copy()
+    daily = tables.get("transaction_detail", tables.get("orders", tables["daily_metrics"])).copy() if metric == "active_users" else tables["daily_metrics"].copy()
     if city_filter:
         daily = daily[daily["city"] == city_filter]
-    if metric.endswith("_rate") or metric in {"ctr", "cvr", "payment_success_rate"}:
-        return daily.groupby("date", as_index=False)[metric].mean()
-    return daily.groupby("date", as_index=False)[metric].sum()
+    return _daily_series(daily, metric).rename(columns={"metric_value": metric})[["date", metric]]
 
 
 def _table_missing(state: WorkflowState, tables: dict[str, pd.DataFrame], required: list[str], route_name: str) -> bool:
@@ -346,34 +343,60 @@ def _resolve_metrics_node(
 
 def _load_data_source_node(
     state: WorkflowState,
-    tables: dict[str, pd.DataFrame],
+    tables: dict[str,pd.DataFrame],
     engine: AnalyticsEngine | None = None,
 ) -> WorkflowState:
     state.add_route("load_data_source")
-    state.tables_available = sorted(tables.keys())
-    if not state.table_metadata:
-        state.table_metadata = _metadata_from_tables(tables)
+    state.tables_available=sorted(tables)
     state.add_route("validate_tables")
-    state.schema_warnings = validate_tables_for_workflow(tables)
     state.add_route("infer_schema")
-    for table_name, df in tables.items():
-        metadata = state.table_metadata.setdefault(
-            table_name,
-            {
-                "source_type": state.data_source_type,
-                "source_name": table_name,
-                "row_count": int(len(df)),
-                "column_count": int(len(df.columns)),
-                "columns": [str(column) for column in df.columns],
-            },
-        )
-        metadata.setdefault("schema_mapping", infer_schema_mapping(table_name, df).to_dict())
-        metadata.setdefault("warnings", validate_tables_for_workflow({table_name: df}))
-    if state.schema_warnings:
-        _append_unique(state.caveats, state.schema_warnings)
+    with trace_stage("data_profile_validation",rows=sum(len(frame) for frame in tables.values()),table_count=len(tables),cache_hit=state.dataset_prepared):
+        if state.dataset_prepared:
+            state.schema_warnings=list(dict.fromkeys(warning for meta in state.table_metadata.values() for warning in meta.get("warnings",[])))
+        else:
+            state.schema_warnings=validate_tables_for_workflow(tables)
+            metadata={}
+            readiness_by_object={}
+            from insightpilot.agents.dataset import build_readiness_summary
+            for name,frame in tables.items():
+                cancellation_checkpoint()
+                item=dict(state.table_metadata.get(name,{}))
+                item.update(row_count=len(frame),column_count=len(frame.columns),columns=list(map(str,frame.columns)),schema_mapping=infer_schema_mapping(name,frame).to_dict())
+                if id(frame) not in readiness_by_object:
+                    with trace_stage("dataset_readiness",table=name,rows=len(frame)):
+                        readiness_by_object[id(frame)] = build_readiness_summary(frame,item["schema_mapping"])
+                item["readiness_summary"] = readiness_by_object[id(frame)]
+                item.pop("builtin_scenario", None)
+                if frame.attrs.get("insightpilot_builtin_scenario"):
+                    item["builtin_scenario"] = frame.attrs["insightpilot_builtin_scenario"]
+                item.setdefault("source_type",state.data_source_type)
+                item.setdefault("source_name",name)
+                item["warnings"]=list(dict.fromkeys([*item.get("warnings",[]),*[warning for warning in state.schema_warnings if warning.startswith(name+":")]]))
+                metadata[name]=item
+            state.table_metadata=metadata
+    _append_unique(state.caveats,state.schema_warnings)
     if state.user_table_mode:
-        _append_unique(state.caveats, CUSTOM_DATA_CAVEATS)
+        _append_unique(state.caveats,CUSTOM_DATA_CAVEATS)
     return state
+
+
+def _input_fingerprint(state: WorkflowState,name: str,frame: pd.DataFrame) -> str:
+    cached=name in state.dataset_fingerprints
+    with trace_stage("input_fingerprint",table=name,rows=len(frame),columns=len(frame.columns),cache_hit=cached):
+        if not cached:
+            if id(frame) not in state._input_fingerprint_objects:
+                state._input_fingerprint_objects[id(frame)]=fingerprint_dataframe(frame)
+            state.dataset_fingerprints[name]=state._input_fingerprint_objects[id(frame)]
+        return state.dataset_fingerprints[name]
+
+
+def _initialize_run_options(state: WorkflowState,presentation_mode: str,prepared_dataset=None) -> None:
+    state.presentation_mode=presentation_mode
+    if prepared_dataset is not None:
+        state.dataset_prepared=True
+        state.dataset_id=prepared_dataset.dataset_id
+        state.dataset_revision=prepared_dataset.revision
+        state.dataset_fingerprints=prepared_dataset.fingerprints
 
 
 def _create_plan_node(
@@ -382,12 +405,57 @@ def _create_plan_node(
     engine: AnalyticsEngine | None = None,
 ) -> WorkflowState:
     state.add_route("create_plan")
+    answers = state.playbook_parameters.pop("_clarification_answers", None)
+    guidance_context = state.playbook_parameters.pop("_guidance_context", {})
+    if state.selected_playbook_id in {"auto", "auto_recommended"}:
+        state.add_route("recommend_playbooks")
+    prepared = prepare_analysis_request(
+        state.user_question, table_metadata=state.table_metadata, goal_mode=state.goal_mode,
+        playbook_id=state.selected_playbook_id,
+        column_mapping=state.intermediate_results.pop("_requested_column_mapping", state.column_mapping if state.mapping_source == "user_selected" else None),
+        playbook_parameters=state.playbook_parameters,
+        semantic_model_id=str(state.playbook_parameters.get("semantic_model_id", "commerce_demo")),
+        clarification_answers=answers,
+        dataset_revision=state.dataset_revision,
+        selection_source=guidance_context.get("selection_source"),
+        analysis_scope=guidance_context.get("analysis_scope"),
+    )
+    for key in ("planning_status", "clarification", "metric_definitions", "semantic_fingerprint", "presentation_fingerprint"):
+        setattr(state, key, prepared[key])
+    state.intermediate_results["analysis_advice"] = prepared["analysis_advice"]
+    state.intermediate_results["preflight"] = prepared["preflight"]
+    normalized = prepared["normalized_request"]
+    originally_auto = state.selected_playbook_id in {"auto", "auto_recommended"}
+    state.selected_playbook_id = normalized["playbook_id"]
+    state.playbook_source = "auto_recommended" if originally_auto else prepared["analysis_advice"]["selection_source"]
+    _append_unique(state.caveats, prepared["analysis_advice"]["effective_method"].get("necessary_caveats", []))
+    state.playbook_parameters = normalized["playbook_parameters"]
+    state.goal_mode = normalized["goal_mode"]
+    if normalized["column_mapping"]:
+        state.column_mapping = normalized["column_mapping"]
+        state.mapping_source = "user_selected"
+    if state.planning_status != "ready":
+        state.add_route("needs_input" if state.planning_status == "needs_clarification" else state.planning_status)
+        messages = [item["question"] for item in state.clarification.get("items", [])]
+        messages += state.clarification.get("errors", []) + state.clarification.get("unsupported_reasons", [])
+        state.intermediate_results["summary"] = "；".join(messages) or "需要补充分析配置。"
+        state.findings = []
+        state.intermediate_results["next_steps"] = messages
     plan = create_analysis_plan(state.user_question, goal_mode=state.goal_mode)
     state.intent = plan.intent
     state.goal_mode = plan.goal_mode
     state.goal_mode_display_name = plan.goal_mode_display_name
     state.goal_mode_source = plan.goal_mode_source
     state.analysis_plan = plan.to_dict()
+    if state.column_mapping.get("metric_columns"):
+        state.selected_metrics = list(state.column_mapping["metric_columns"])
+        state.analysis_plan["related_metrics"] = list(state.selected_metrics)
+        if state.column_mapping.get("dimension_columns"):
+            state.analysis_plan["dimensions"] = list(state.column_mapping["dimension_columns"])
+        if state.planning_status == "ready":
+            state.analysis_plan["analysis_steps"] = [step for step in state.analysis_plan["analysis_steps"] if step != UNRESOLVED_METRIC_STEP]
+        state.analysis_plan["analysis_steps"].insert(0, "本次手动字段映射优先于问题关键词。")
+        plan = AnalysisPlan(**state.analysis_plan)
     state.intermediate_results["plan"] = plan
     return state
 
@@ -427,7 +495,7 @@ def _run_playbook_node(
         requested_id = recommendations[0].playbook_id if recommendations else "data_profile"
         state.playbook_source = "auto_recommended"
     else:
-        state.playbook_source = "user_selected"
+        state.playbook_source = "auto_recommended" if state.playbook_source == "auto_recommended" else state.intermediate_results.get("analysis_advice", {}).get("selection_source", "user_selected")
     state.selected_playbook_id = requested_id
     state.add_route("select_playbook")
     state.add_route("validate_playbook")
@@ -446,15 +514,17 @@ def _run_playbook_node(
         _append_unique(state.caveats, [f"分析剧本无法执行：{exc}"])
         return state
 
-    state.add_route("build_safe_query")
     metadata = execution.metadata if isinstance(execution.metadata, dict) else {}
+    preview_only = metadata.get("metric_request", {}).get("execution_mode") == "plan_only" or state.execution_mode == "plan_only"
+    if execution.executed_queries:
+        state.add_route("build_safe_query")
     if metadata.get("multi_table"):
         state.add_route("load_semantic_model") if metadata.get("semantic_model") else None
         state.add_route("build_relationship_graph") if metadata.get("semantic_model") else None
         state.add_route("plan_joins") if metadata.get("join_plan") else None
         state.add_route("compile_metric_query") if metadata.get("query_plan") else None
         state.add_route("review_query_plan") if metadata.get("plan_review") else None
-    state.add_route("execute_playbook")
+    state.add_route("preview_playbook" if preview_only else "execute_playbook")
     state.executed_queries.extend(execution.executed_queries)
     for query_record in execution.executed_queries:
         if query_record.get("status") == "failed":
@@ -484,6 +554,12 @@ def _run_playbook_node(
         state.mapping_warnings = list(dict.fromkeys([*state.mapping_warnings, *execution.warnings]))
         if not state.selected_metrics:
             state.selected_metrics = list(mapping.get("metric_columns", []))
+    if execution.playbook_id == "funnel_analysis":
+        state.selected_metrics = ["session_conversion_rate"]
+    elif execution.playbook_id == "cohort_retention":
+        state.selected_metrics = ["cohort_retention_rate"]
+    if state.goal_mode not in get_playbook_registry().get(execution.playbook_id).supported_goal_modes:
+        _append_unique(state.caveats, ["显式分析剧本优先于目标模式，本次执行所选剧本的字段与方法。 "])
     state.findings = list(execution.findings)
     _append_unique(state.caveats, execution.caveats)
     _append_unique(state.caveats, execution.warnings)
@@ -501,8 +577,11 @@ def _run_playbook_node(
     state.intermediate_results["next_steps"] = [
         "复核 Column Mapping、playbook 参数与 caveats 后再解释结果。"
     ]
-    state.add_route("generate_charts")
-    chart_pairs = build_charts(execution.chart_specs, execution.result_tables)
+    chart_pairs=[]
+    if state.presentation_mode == "eager" and execution.chart_specs and execution.result_tables:
+        state.add_route("generate_charts")
+        with trace_stage("chart_construction",chart_count=len(execution.chart_specs)):
+            chart_pairs=build_charts(execution.chart_specs,execution.result_tables)
     state.intermediate_results["chart_pairs"] = chart_pairs
     state.intermediate_results["charts"] = [figure for _, figure in chart_pairs]
     return state
@@ -516,7 +595,23 @@ def _build_governance_node(
     """Build contracts and lineage for semantic runs without affecting legacy routes."""
 
     del engine
+    if state.planning_status != "ready":
+        return state
     if not state.semantic_model:
+        graph = LineageGraph()
+        for name, frame in sorted(tables.items()):
+            graph.add_dataset(DatasetNode(f"input_{name}", name, "input", _input_fingerprint(state,name,frame), len(frame), list(map(str, frame.columns))))
+        results = state.intermediate_results.get("result_tables", {})
+        if state.execution_mode != "plan_only" and results:
+            operation = "operation_analysis"
+            graph.add_operation(OperationNode(operation, "analysis", "本次本地分析", str(state.selected_playbook_id or state.goal_mode), {"route_taken": list(state.route_taken)}))
+            for name in sorted(tables):
+                graph.add_edge(LineageEdge(f"input_{name}", operation, "used_by"))
+            for name, frame in sorted(results.items()):
+                graph.add_dataset(DatasetNode(f"result_{name}", name, "output", fingerprint_dataframe(frame), len(frame), list(map(str, frame.columns))))
+                graph.add_edge(LineageEdge(operation, f"result_{name}", "produces"))
+        state.lineage = graph.to_dict()
+        state.add_route("build_lineage")
         return state
     model_id = str(state.semantic_model.get("model_id") or "commerce_demo")
     try:
@@ -556,7 +651,7 @@ def _build_governance_node(
                 f"input_{table_name}",
                 table_name,
                 "input",
-                fingerprint_dataframe(frame),
+                _input_fingerprint(state,table_name,frame),
                 int(len(frame)),
                 [str(column) for column in frame.columns],
             )
@@ -594,20 +689,21 @@ def _build_governance_node(
     return state
 
 
-def _set_observability(state: WorkflowState, tracer: LocalTracer) -> WorkflowState:
-    state.add_route("summarize_observability")
+def _set_observability(state: WorkflowState, tracer: LocalTracer, *, add_route: bool = True) -> WorkflowState:
+    if add_route:
+        state.add_route("summarize_observability")
     join_risk_count = sum(
         1
         for step in state.join_plan.get("steps", [])
         if isinstance(step, dict) and step.get("risk_level") != "safe"
     )
     summary = tracer.summary(
-        query_count=len(state.executed_queries),
+        query_count=sum(span.name == "sql_query" for span in tracer.spans),
         warning_count=len(state.schema_warnings) + len(state.mapping_warnings),
         error_count=len(state.errors),
         join_risk_count=join_risk_count,
     )
-    state.telemetry = {**tracer.to_dict(), "summary": summary.to_dict()}
+    state.telemetry = {**tracer.to_dict(), "summary": {**summary.to_dict(),"operation_count":len(state.executed_queries)}}
     return state
 
 
@@ -618,9 +714,8 @@ def _build_observability_node(
 ) -> WorkflowState:
     del tables, engine
     tracer = LocalTracer(state.trace_id)
-    for route_step in state.route_taken:
-        with tracer.span(route_step):
-            pass
+    # Without the runner tracer, no historical durations were measured.
+    # Never fabricate timings by replaying routes after execution.
     return _set_observability(state, tracer)
 
 
@@ -640,7 +735,14 @@ def _build_manifest_node(
     reviewer = state.intermediate_results.get("reviewer", {})
     reviewer_dict = reviewer if isinstance(reviewer, dict) else {}
     manifest = RunManifest(
-        manifest_version="1.0",
+        manifest_version=CURRENT_MANIFEST_VERSION,
+        metric_definitions=state.metric_definitions,
+        semantic_fingerprint=state.semantic_fingerprint,
+        presentation_fingerprint=state.presentation_fingerprint,
+        planning_status=state.planning_status,
+        clarification=state.clarification,
+        analysis_advice=state.intermediate_results.get("analysis_advice", {}),
+        preflight=state.intermediate_results.get("preflight", {}),
         project_version=__version__,
         run_id=state.trace_id,
         created_at=state.created_at,
@@ -651,7 +753,7 @@ def _build_manifest_node(
             "table_names": sorted(tables),
         },
         table_summaries=table_summaries,
-        dataset_fingerprints={name: fingerprint_dataframe(df) for name, df in sorted(tables.items())},
+        dataset_fingerprints={name: _input_fingerprint(state,name,df) for name, df in sorted(tables.items())},
         question=state.user_question,
         goal_mode=state.goal_mode,
         goal_mode_source=state.goal_mode_source,
@@ -731,9 +833,15 @@ def _run_metric_diagnosis_node(
 
     plan = AnalysisPlan(**state.analysis_plan)
     metric = _first_metric(plan, tables["daily_metrics"], "orders")
-    city_filter = "South City" if any(term in state.user_question for term in ("城市", "South")) else None
-    where_clause = "WHERE city = 'South City'" if city_filter else ""
-    query = f"SELECT date, SUM({metric}) AS {metric} FROM daily_metrics {where_clause} GROUP BY date ORDER BY date"
+    city_filter = None
+    where_clause = ""
+    if any(term in state.user_question for term in ("城市", "South", "北城", "南城")):
+        _append_unique(state.caveats, ["本次城市问题按所有城市比较，不从自然语言静默选择城市；如需单城请使用明确筛选后的数据。 "])
+    aggregate = "COUNT(DISTINCT user_id)" if metric == "active_users" and "transaction_detail" in tables else metric_aggregate_sql(metric, set(tables["daily_metrics"].columns), "mean" if metric.endswith("_rate") or metric in {"ctr", "cvr"} else "sum")
+    query = f"SELECT date, {aggregate} AS {metric} FROM daily_metrics {where_clause} GROUP BY date ORDER BY date"
+    if metric == "active_users" and "transaction_detail" in tables:
+        query = query.replace("FROM daily_metrics", "FROM transaction_detail")
+        _append_unique(state.caveats, ["支付活跃用户按支付明细user_id逐日去重，不代表全站访问UV；不能累加各维度UV。 "])
     metric_frame = _run_query(
         engine,
         query,
@@ -746,7 +854,7 @@ def _run_metric_diagnosis_node(
 
     state.add_route("run_attribution")
     contributions: dict[str, list[dict[str, object]]] = {}
-    for dimension in [dim for dim in plan.dimensions if dim in tables["daily_metrics"].columns]:
+    for dimension in [dim for dim in plan.dimensions if dim in tables["daily_metrics"].columns and metric != "active_users"]:
         contribution = dimension_contribution(tables["daily_metrics"], metric, dimension)
         contributions[dimension] = contribution.head(5).to_dict(orient="records")
 
@@ -787,7 +895,11 @@ def _run_growth_trend_node(
     plan = AnalysisPlan(**state.analysis_plan)
     metric = _first_metric(plan, tables["daily_metrics"], "active_users")
     state.add_route("run_trend_summary")
-    query = f"SELECT date, SUM({metric}) AS {metric} FROM daily_metrics GROUP BY date ORDER BY date"
+    aggregate = "COUNT(DISTINCT user_id)" if metric == "active_users" and "transaction_detail" in tables else metric_aggregate_sql(metric, set(tables["daily_metrics"].columns), "mean" if metric.endswith("_rate") or metric in {"ctr", "cvr"} else "sum")
+    query = f"SELECT date, {aggregate} AS {metric} FROM daily_metrics GROUP BY date ORDER BY date"
+    if metric == "active_users" and "transaction_detail" in tables:
+        query = query.replace("FROM daily_metrics", "FROM transaction_detail")
+        _append_unique(state.caveats, ["支付活跃用户按支付明细user_id逐日去重，不代表全站访问UV；不能累加各维度UV。 "])
     metric_frame = _run_query(
         engine,
         query,
@@ -837,19 +949,6 @@ def _run_experiment_node(
     )
     ab_result = analyze_ab_test(experiments, "group", "completion_rate", metric_type="mean")
 
-    state.add_route("run_causal_light")
-    _record_operation(
-        state,
-        "experiment_adjusted_effect",
-        "estimate_adjusted_effect(experiments, group, completion_rate, covariates)",
-        len(experiments),
-    )
-    effect = estimate_adjusted_effect(
-        experiments,
-        "group",
-        "completion_rate",
-        ["historical_activity", "historical_revenue", "city", "channel", "user_segment"],
-    )
     strata = (
         experiments.groupby(["user_segment", "group"])["completion_rate"]
         .mean()
@@ -864,11 +963,7 @@ def _run_experiment_node(
             f"{float(ab_result['control_mean']):.2%}，相对 lift 为 {float(ab_result['relative_lift']):.2%}。"
         ),
         f"实验样本量：对照组 {sample_size['control']:,}，实验组 {sample_size['treatment']:,}。",
-        f"显著性检验：p-value={float(ab_result['p_value']):.6f}，95% 置信区间={ab_result['confidence_interval']}。",
-        (
-            f"轻量调整后估计效果为 {float(effect['adjusted_effect']):.4f}，"
-            f"未调整组间差异为 {float(effect['naive_difference']):.4f}。"
-        ),
+        f"显著性检验：p-value={float(ab_result['p_value']):.3g}，95% 置信区间={ab_result['confidence_interval']}。",
         str(ab_result["conclusion"]),
         REPORT_LIMITATION,
     ]
@@ -878,11 +973,10 @@ def _run_experiment_node(
     ]
     _set_node_outputs(
         state,
-        summary="A/B 实验评估已完成，包含 p-value、样本量和轻量调整结果。",
+        summary="A/B 实验评估已完成，包含独立样本量、Welch 检验及绝对差置信区间。",
         findings=findings,
         artifacts={
             "ab_test": ab_result,
-            "causal_light": effect,
             "strata": strata.round(6).to_dict(orient="records"),
         },
         next_steps=next_steps,
@@ -1015,6 +1109,7 @@ def _run_causal_exploration_node(
 
     experiments = tables["experiments"]
     state.add_route("run_causal_light")
+    state.selected_metrics = ["completion_rate"]
     _record_operation(
         state,
         "causal_light_adjusted_effect",
@@ -1033,7 +1128,7 @@ def _run_causal_exploration_node(
             f"regression adjusted effect={float(effect['adjusted_effect']):.4f}。"
         ),
         (
-            f"propensity weighted effect={float(effect['propensity_weighted_effect']):.4f}，"
+            f"倾向评分加权默认关闭；"
             f"sample_size={effect['sample_size']}。"
         ),
         "轻量因果探索仅用于形成分析假设，不能把相关性直接解释为因果关系。",
@@ -1067,7 +1162,8 @@ def _run_periodic_report_node(
     daily = tables["daily_metrics"]
     metric = _first_metric(plan, daily, "active_users")
     state.add_route("run_periodic_report")
-    query = f"SELECT date, SUM({metric}) AS {metric} FROM daily_metrics GROUP BY date ORDER BY date"
+    aggregate = "COUNT(DISTINCT user_id)" if metric == "active_users" and "transaction_detail" in tables else metric_aggregate_sql(metric, set(tables["daily_metrics"].columns), "mean" if metric.endswith("_rate") or metric in {"ctr", "cvr"} else "sum")
+    query = f"SELECT date, {aggregate} AS {metric} FROM daily_metrics GROUP BY date ORDER BY date"
     summary_frame = _run_query(
         engine,
         query,
@@ -1108,16 +1204,27 @@ def _profile_custom_tables(state: WorkflowState, tables: dict[str, pd.DataFrame]
     return profiles
 
 
-def _custom_date_metric_frame(df: pd.DataFrame, date_col: str, metric_col: str, time_grain: str = "day") -> pd.DataFrame:
-    working = df[[date_col, metric_col]].copy()
+def _custom_date_metric_frame(df: pd.DataFrame, date_col: str, metric_col: str, time_grain: str = "day", aggregation: str = "sum") -> pd.DataFrame:
+    pair=metric_components(metric_col,df.columns)
+    working = df.loc[:,list(dict.fromkeys([date_col,metric_col,*(pair or ())]))].copy()
     working[date_col] = pd.to_datetime(working[date_col], errors="coerce")
-    working[metric_col] = pd.to_numeric(working[metric_col], errors="coerce")
+    if aggregation != "count_distinct":
+        working[metric_col] = pd.to_numeric(working[metric_col], errors="coerce")
     working = working.dropna(subset=[date_col, metric_col])
     if time_grain == "week":
         working[date_col] = working[date_col].dt.to_period("W").dt.start_time
     elif time_grain == "month":
         working[date_col] = working[date_col].dt.to_period("M").dt.to_timestamp()
-    return working.groupby(date_col, as_index=False)[metric_col].sum().sort_values(date_col)
+    pair = metric_components(metric_col, working.columns)
+    if pair:
+        numerator, denominator = pair
+        result = working.groupby(date_col, as_index=False)[[numerator, denominator]].sum()
+        result[metric_col] = result[numerator] / result[denominator].replace(0, float("nan"))
+        return result[[date_col, metric_col]].sort_values(date_col)
+    if metric_col.endswith("_rate") or metric_col in {"ctr", "cvr"}:
+        if aggregation != "mean":
+            raise ValueError("比率缺少分子分母，不能求和，请明确等权单位后选择 mean。")
+    return working.groupby(date_col, as_index=False)[metric_col].agg("nunique" if aggregation == "count_distinct" else aggregation).sort_values(date_col)
 
 
 def _find_experiment_columns(df: pd.DataFrame) -> tuple[str | None, str | None]:
@@ -1165,6 +1272,10 @@ def _run_generic_analysis_node(
     dimension_columns = applied_mapping.dimension_columns or list(
         schema_mapping.get("possible_dimension_columns") or schema_mapping.get("detected_categorical_columns", [])
     )
+    if state.mapping_source == "user_selected":
+        date_columns = [applied_mapping.date_column] if applied_mapping.date_column else []
+        metric_columns = list(applied_mapping.metric_columns)
+        dimension_columns = list(applied_mapping.dimension_columns)
     route = _route_from_plan(state)
     findings: list[str] = [
         f"数据来源为 {state.data_source_type}，当前使用表 {table_name}（{len(df)} 行，{len(df.columns)} 列）进行通用分析。",
@@ -1182,12 +1293,14 @@ def _run_generic_analysis_node(
             date_col = date_columns[0]
             metric_col = metric_columns[0]
             state.add_route("run_generic_trend")
-            metric_frame = _custom_date_metric_frame(df, date_col, metric_col, applied_mapping.time_grain)
+            metric_frame = _custom_date_metric_frame(df, date_col, metric_col, applied_mapping.time_grain, applied_mapping.aggregation)
+            state.intermediate_results.setdefault("result_tables", {})["metric_trend"] = metric_frame.copy()
             artifacts["generic_trend"] = _round_value(metric_frame.tail(20).to_dict(orient="records"))
             if len(metric_frame) >= 8:
                 state.add_route("run_generic_anomaly")
                 anomaly = detect_metric_anomaly(metric_frame, metric_col, date_col=date_col)
                 artifacts["generic_anomaly"] = _round_value(anomaly)
+                state.intermediate_results.setdefault("result_tables", {})["anomalies"] = pd.DataFrame([anomaly])
                 findings.append(
                     f"{metric_col} 最新日期相对前 7 日均值变化 {float(anomaly['relative_change']):.2%}，severity={anomaly['severity']}。"
                 )
@@ -1201,8 +1314,9 @@ def _run_generic_analysis_node(
                     breakdowns: dict[str, Any] = {}
                     for dimension in dimension_columns[:3]:
                         try:
-                            contribution = dimension_contribution(df, metric_col, dimension, date_col=date_col)
+                            contribution = dimension_contribution(df, metric_col, dimension, date_col=date_col, aggregation=applied_mapping.aggregation)
                             breakdowns[dimension] = contribution.head(5).to_dict(orient="records")
+                            state.intermediate_results.setdefault("result_tables", {})[f"dimension_{dimension}"] = contribution.copy()
                         except Exception as exc:
                             state.mapping_warnings.append(f"维度 {dimension} 拆解失败：{exc}")
                     if breakdowns:
@@ -1221,6 +1335,7 @@ def _run_generic_analysis_node(
                             "max": float(numeric.max()),
                         }
                 artifacts["generic_metric_summary"] = _round_value(summary)
+                state.intermediate_results.setdefault("result_tables", {})["metric_summary"] = pd.DataFrame.from_dict(summary, orient="index").reset_index(names="metric")
                 findings.append("未选择日期列，已根据 metric_columns 输出指标摘要。")
                 caveats.append("缺少 date_column，无法执行时间趋势或异常检测。")
             else:
@@ -1233,29 +1348,25 @@ def _run_generic_analysis_node(
             group_col, metric_col = _find_experiment_columns(df)
         if group_col and metric_col:
             state.add_route("run_generic_experiment")
-            values = set(df[group_col].dropna().astype(str).str.lower().unique())
-            if {"control", "treatment"}.issubset(values):
-                ab_result = analyze_ab_test(df, group_col, metric_col, metric_type="mean")
+            control = state.playbook_parameters.get("control_value", "control")
+            treatment = state.playbook_parameters.get("treatment_value", "treatment")
+            values = set(df[group_col].dropna().unique())
+            if {control, treatment}.issubset(values):
+                unit = state.playbook_parameters.get("statistical_unit") or applied_mapping.statistical_unit
+                ab_result = analyze_ab_test(df, group_col, metric_col, metric_type=str(state.playbook_parameters.get("metric_type", "mean")),
+                    statistical_unit=unit, control_value=control, treatment_value=treatment,
+                    confidence_level=float(state.playbook_parameters.get("confidence_level", .95)))
                 artifacts["generic_ab_test"] = _round_value(ab_result)
                 findings.extend(
                     [
                         f"识别到实验分组字段 {group_col} 和指标字段 {metric_col}。",
-                        f"p_value={float(ab_result['p_value']):.6f}，sample_size={ab_result['sample_size']}。",
+                        f"p_value={float(ab_result['p_value']):.3g}，sample_size={ab_result['sample_size']}。",
                         str(ab_result["conclusion"]),
                     ]
                 )
             else:
-                group_summary = (
-                    df[[group_col, metric_col]]
-                    .assign(**{metric_col: pd.to_numeric(df[metric_col], errors="coerce")})
-                    .dropna(subset=[group_col, metric_col])
-                    .groupby(group_col)[metric_col]
-                    .agg(["count", "mean"])
-                    .reset_index()
-                )
-                artifacts["generic_group_mean_comparison"] = _round_value(group_summary.to_dict(orient="records"))
-                findings.append(f"使用 group_column={group_col} 和 metric={metric_col} 输出组间均值比较。")
-                caveats.append("group_column 未同时包含 control/treatment，未执行 A/B 显著性检验。")
+                state.errors.append("所选对照值/实验值不同时存在于分组列；请修正明确分组配置，未执行显著性检验。")
+                caveats.append(state.errors[-1])
         else:
             findings.append("未识别到包含 control/treatment 的分组字段和数值指标，无法执行通用实验评估。")
             caveats.append("实验分析需要明确 group 字段且包含 control/treatment，以及一个数值 outcome 字段。")
@@ -1264,7 +1375,7 @@ def _run_generic_analysis_node(
             state.add_route("run_generic_causal_light")
             covariates = [
                 column
-                for column in dimension_columns[:5]
+                for column in (applied_mapping.covariates or dimension_columns[:5])
                 if column not in {applied_mapping.treatment_column, applied_mapping.outcome_column}
             ]
             if covariates:
@@ -1336,21 +1447,48 @@ def _build_analysis_results_node(
 
     del engine
     state.add_route("build_analysis_results")
+    if state.planning_status != "ready":
+        status = {"needs_clarification": "NEEDS_INPUT", "unsupported": "UNSUPPORTED", "invalid_input": "INVALID_INPUT"}[state.planning_status]
+        package = AnalysisResultPackage(run_id=state.trace_id, scenario="planning", question=state.user_question,
+            executive_summary=state.intermediate_results.get("summary", "请补充输入。"), execution_status=status,
+            metadata={"planning_status": state.planning_status})
+        state.analysis_result_package = package.to_dict_summary()
+        return state
     if state.execution_mode == "plan_only":
         package = AnalysisResultPackage(
             run_id=state.trace_id,
             scenario="plan_only",
             question=state.user_question,
-            executive_summary="当前仅展示分析方案，尚未执行实际计算。",
+            executive_summary="方案校验失败，未执行实际计算，请修正输入。" if state.errors else "当前仅展示分析方案，尚未执行实际计算。",
             caveats=[str(item) for item in state.caveats],
             metadata={"execution_mode": "plan_only"},
+            execution_status="FAILED" if state.errors else "PREVIEW",
         )
         state.analysis_result_package = package.to_dict_summary()
         state.intermediate_results["summary"] = package.executive_summary
         state.findings = [package.executive_summary]
         return state
+    if "needs_input" in state.route_taken:
+        state.analysis_result_package = AnalysisResultPackage(run_id=state.trace_id, scenario="needs_input", question=state.user_question, executive_summary=state.intermediate_results.get("summary", "请补充输入。"), execution_status="NEEDS_INPUT").to_dict_summary()
+        return state
+    if state.selected_playbook_id == "semantic_metric_query" and state.plan_review.get("decision") != "approved":
+        state.analysis_result_package = AnalysisResultPackage(run_id=state.trace_id, scenario="semantic", question=state.user_question, executive_summary=state.plan_review.get("reason", "等待方案审批。"), execution_status="WAITING_APPROVAL" if state.plan_review.get("decision") == "pending" else "FAILED").to_dict_summary()
+        return state
     existing_findings = list(state.findings)
-    package = build_analysis_result_package(state, tables)
+    with trace_stage("statistics_result_package",table_count=len(tables)):
+        package = build_analysis_result_package(state, tables)
+    if state.errors:
+        package.execution_status = "FAILED"
+    elif not package.has_structured_results() or ((state.selected_playbook_id == "experiment_comparison" or not state.selected_playbook_id and state.goal_mode == "experiment_analysis") and not package.experiment_results):
+        package.execution_status = "NEEDS_INPUT"
+    if not state.chart_specs and package.execution_status == "COMPLETED":
+        from insightpilot.visualization.result_charts import build_result_chart_specs
+        state.chart_specs=[spec.to_dict() for spec in build_result_chart_specs(package.result_tables)]
+        package.chart_specs=list(state.chart_specs)
+        if state.presentation_mode == "eager":
+            with trace_stage("chart_construction",chart_count=len(state.chart_specs)):
+                chart_pairs=build_charts(state.chart_specs,package.result_tables)
+            state.intermediate_results["charts"]=[figure for _,figure in chart_pairs]
     validation_issues = package.validate()
     if validation_issues:
         _append_unique(state.caveats, [f"结构化结果校验提示：{item}" for item in validation_issues])
@@ -1383,7 +1521,7 @@ def _report_node(
 ) -> WorkflowState:
     state.add_route("generate_report")
     result = _build_result_from_state(state)
-    result["report_markdown"] = generate_markdown_report(result)
+    result["report_markdown"] = generate_markdown_report(result) if state.presentation_mode == "eager" and state.planning_status == "ready" else ""
     state.intermediate_results["result"] = result
     return state
 
@@ -1453,6 +1591,14 @@ def _build_result_from_state(state: WorkflowState) -> dict[str, Any]:
     trace_dict = trace.to_dict()
     workflow_backend = str(state.intermediate_results.get("workflow_backend", WORKFLOW_BACKEND_RULE_BASED))
     return {
+        "execution_status": state.analysis_result_package.get("execution_status", "NEEDS_INPUT"),
+        "planning_status": state.planning_status,
+        "analysis_advice": state.intermediate_results.get("analysis_advice", {}),
+        "preflight": state.intermediate_results.get("preflight", {}),
+        "clarification": state.clarification,
+        "metric_definitions": state.metric_definitions,
+        "semantic_fingerprint": state.semantic_fingerprint,
+        "presentation_fingerprint": state.presentation_fingerprint,
         "question": state.user_question,
         "summary": state.intermediate_results.get("summary", ""),
         "intent": state.intent,
@@ -1469,6 +1615,7 @@ def _build_result_from_state(state: WorkflowState) -> dict[str, Any]:
         "limitations": state.caveats,
         "next_steps": state.intermediate_results.get("next_steps", []),
         "workflow_backend": workflow_backend,
+        "presentation_mode": state.presentation_mode,
         "route_taken": state.route_taken,
         "errors": state.errors,
         "data_source_type": state.data_source_type,
@@ -1493,7 +1640,7 @@ def _build_result_from_state(state: WorkflowState) -> dict[str, Any]:
         "export_formats": state.export_formats,
         "semantic_model": state.semantic_model,
         "semantic_catalog": state.semantic_catalog,
-        "metric_request": state.metric_request,
+        "metric_request": sanitize_manifest_value(state.metric_request),
         "relationship_graph": state.relationship_graph,
         "join_plan": state.join_plan,
         "query_plan": state.query_plan,
@@ -1508,13 +1655,40 @@ def _build_result_from_state(state: WorkflowState) -> dict[str, Any]:
     }
 
 
+def _scope_analysis_tables(state: WorkflowState, tables: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
+    """Apply an explicitly selected inclusive date window to date-bearing inputs.
+
+    Source snapshots/manifest fingerprints remain the original dataset; the filter
+    is part of the request and definition fingerprint. No work occurs on browsing.
+    """
+    window = state.playbook_parameters.get("date_range")
+    if not window or state.selected_playbook_id:
+        return tables  # Playbooks already apply their own declared date window.
+    start, end = pd.Timestamp(window[0]), pd.Timestamp(window[1]) + pd.Timedelta(days=1)
+    selected = state.column_mapping.get("table_name")
+    result = dict(tables)
+    for name, frame in tables.items():
+        date_column = state.column_mapping.get("date_column") if name == selected else "date"
+        if date_column and date_column in frame:
+            cancellation_checkpoint()
+            dates = pd.to_datetime(frame[date_column], errors="coerce")
+            result[name] = frame.loc[(dates >= start) & (dates < end)]
+    return result
+
+
 def _run_routed_analysis(
     state: WorkflowState,
     tables: dict[str, pd.DataFrame],
     engine: AnalyticsEngine | None,
 ) -> WorkflowState:
+    if state.planning_status != "ready":
+        return state
     if state.user_table_mode:
         return _run_generic_analysis_node(state, tables, engine)
+    if not state.selected_metrics and state.goal_mode_source == "auto_detected" and state.intent == "general_summary":
+        state.add_route("needs_input")
+        _set_node_outputs(state, "未识别到受支持的分析指标，请选择指标、示例问题或字段映射。", ["规则规划器仅支持明确的指标与目标；当前问题需要补充输入。"], {}, ["选择一个已有指标或分析剧本。"])
+        return state
     route = _route_from_plan(state)
     route_nodes: dict[str, Callable[[WorkflowState, dict[str, pd.DataFrame], AnalyticsEngine | None], WorkflowState]] = {
         "metric_diagnosis": _run_metric_diagnosis_node,
@@ -1541,6 +1715,8 @@ def _run_rule_based_workflow(
     playbook_id: str | None = None,
     playbook_parameters: dict[str, Any] | None = None,
     execution_mode: str = "execute",
+    presentation_mode: str = "eager",
+    prepared_dataset=None,
 ) -> dict[str, Any]:
     state = create_initial_state(
         question,
@@ -1553,6 +1729,7 @@ def _run_rule_based_workflow(
         playbook_parameters=playbook_parameters,
         execution_mode=execution_mode,
     )
+    _initialize_run_options(state,presentation_mode,prepared_dataset)
     state.intermediate_results["workflow_backend"] = workflow_backend
     if initial_caveats:
         _append_unique(state.caveats, initial_caveats)
@@ -1561,27 +1738,54 @@ def _run_rule_based_workflow(
     engine = _safe_engine(tables)
     tracer = LocalTracer(state.trace_id)
 
-    def run_traced(name: str, fn: Callable[..., WorkflowState]) -> None:
+    def run_traced(name: str,fn: Callable[...,WorkflowState]) -> None:
         with tracer.span(name):
-            fn(state, tables, engine)
+            if name in {"run_routed_analysis", "build_analysis_results"} and state.planning_status == "ready" and state.playbook_parameters.get("date_range") and not state.selected_playbook_id:
+                scoped = _scope_analysis_tables(state, tables)
+                scoped_engine = _safe_engine(scoped)
+                try:
+                    fn(state, scoped, scoped_engine)
+                finally:
+                    if scoped_engine is not None:
+                        scoped_engine.close()
+            else:
+                fn(state,tables,engine)
 
-    run_traced("load_data_source", _load_data_source_node)
-    run_traced("prepare_column_mapping", _prepare_column_mapping_node)
-    run_traced("resolve_metrics", _resolve_metrics_node)
-    run_traced("create_plan", _create_plan_node)
-    if state.execution_mode == "plan_only" and state.selected_playbook_id != "semantic_metric_query":
-        state.add_route("preview_analysis_plan")
-    elif state.selected_playbook_id:
-        run_traced("run_playbook", _run_playbook_node)
-    else:
-        run_traced("run_routed_analysis", _run_routed_analysis)
-    run_traced("build_analysis_results", _build_analysis_results_node)
-    run_traced("build_governance", _build_governance_node)
-    _set_observability(state, tracer)
-    run_traced("build_manifest", _build_manifest_node)
-    run_traced("review", _review_node)
-    run_traced("generate_report", _report_node)
-    return state.intermediate_results["result"]
+    try:
+        with use_tracer(tracer), aggregate_scope():
+            run_traced("load_data_source",_load_data_source_node)
+            run_traced("prepare_column_mapping",_prepare_column_mapping_node)
+            run_traced("resolve_metrics",_resolve_metrics_node)
+            run_traced("create_plan",_create_plan_node)
+            if state.planning_status != "ready":
+                pass
+            elif state.execution_mode == "plan_only" and state.selected_playbook_id != "semantic_metric_query":
+                state.add_route("preview_analysis_plan")
+            elif state.selected_playbook_id:
+                run_traced("run_playbook",_run_playbook_node)
+            else:
+                run_traced("run_routed_analysis",_run_routed_analysis)
+            run_traced("build_analysis_results",_build_analysis_results_node)
+            run_traced("build_governance",_build_governance_node)
+            _set_observability(state,tracer)
+            run_traced("build_manifest",_build_manifest_node)
+            run_traced("review",_review_node)
+            run_traced("generate_report",_report_node)
+    finally:
+        if engine is not None:
+            engine.close()
+    return _finalize_observability(state,tracer)
+
+
+def _finalize_observability(state: WorkflowState,tracer: LocalTracer) -> dict[str,Any]:
+    """Refresh compact telemetry after every measured node without rebuilding data."""
+    _set_observability(state,tracer,add_route=False)
+    result=state.intermediate_results["result"]
+    result["telemetry"]=state.telemetry
+    result["trace"]["observability_summary"]=state.telemetry["summary"]
+    if isinstance(result.get("workflow_state"),dict):
+        result["workflow_state"]["telemetry"]=state.telemetry
+    return result
 
 
 def _langgraph_available() -> bool:
@@ -1603,20 +1807,40 @@ def run_agent_analysis(
     approved_plan_id: str | None = None,
     semantic_model_id: str = "commerce_demo",
     metric_request: dict[str, Any] | None = None,
+    presentation_mode: str = "eager",
+    prepared_dataset=None,
+    clarification_answers: dict[str, Any] | None = None,
+    selection_source: str | None = None,
+    analysis_scope: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run the deterministic workflow over synthetic tables."""
 
+    cancellation_checkpoint()
+    if presentation_mode not in {"eager","deferred"}:
+        raise ValueError("presentation_mode 必须为eager或deferred。")
+    if prepared_dataset is not None:
+        from insightpilot.agents.dataset import PreparedDataset
+        if not isinstance(prepared_dataset,PreparedDataset):
+            raise TypeError("prepared_dataset必须是受控PreparedDataset。")
+        tables=dict(prepared_dataset._tables)
+        table_metadata=prepared_dataset.metadata
     effective_parameters = dict(playbook_parameters or {})
+    effective_parameters["_guidance_context"] = {"selection_source": selection_source, "analysis_scope": analysis_scope}
+    if clarification_answers is not None:
+        effective_parameters["_clarification_answers"] = dict(clarification_answers)
     effective_execution_mode = "plan_only" if plan_only else (execution_mode or "execute")
     if playbook_id == "semantic_metric_query":
         request_values = dict(metric_request or {})
-        if request_values.get("metrics") and not effective_parameters.get("metric"):
-            effective_parameters["metric"] = list(request_values["metrics"])[0]
+        if request_values.get("metrics") and not effective_parameters.get("metrics"):
+            effective_parameters["metrics"] = list(request_values["metrics"])
         if request_values.get("dimensions") is not None and "dimensions" not in effective_parameters:
             effective_parameters["dimensions"] = request_values["dimensions"]
-        for key in ["date_dimension", "date_from", "date_to", "time_grain", "limit"]:
-            if request_values.get(key) is not None and key not in effective_parameters:
+        for key in ["date_dimension", "date_from", "date_to", "time_grain", "limit", "sort", "filters"]:
+            if key in request_values and key not in effective_parameters:
                 effective_parameters[key] = request_values[key]
+        if metric_request:
+            effective_parameters.setdefault("date_dimension", None)
+            effective_parameters.setdefault("dimensions", [])
         effective_parameters["semantic_model_id"] = semantic_model_id
         effective_parameters["execution_mode"] = effective_execution_mode
         if approved_plan_id:
@@ -1637,22 +1861,11 @@ def run_agent_analysis(
                     playbook_id=playbook_id,
                     playbook_parameters=effective_parameters,
                     execution_mode=effective_execution_mode,
+                    presentation_mode=presentation_mode,
+                    prepared_dataset=prepared_dataset,
                 )
             except Exception as exc:
-                return _run_rule_based_workflow(
-                    question,
-                    tables,
-                    goal_mode=goal_mode,
-                    workflow_backend=WORKFLOW_BACKEND_LANGGRAPH_FALLBACK,
-                    initial_caveats=["Optional LangGraph workflow 不可用，已自动回退到 rule-based workflow。"],
-                    initial_errors=[f"LangGraph workflow fallback: {exc}"],
-                    data_source_type=data_source_type,
-                    table_metadata=table_metadata,
-                    column_mapping=column_mapping,
-                    playbook_id=playbook_id,
-                    playbook_parameters=effective_parameters,
-                    execution_mode=effective_execution_mode,
-                )
+                raise RuntimeError("LangGraph 已安装，但工作流节点执行失败；请检查真实异常，未伪装缺依赖或静默重跑。") from exc
         return _run_rule_based_workflow(
             question,
             tables,
@@ -1665,6 +1878,8 @@ def run_agent_analysis(
             playbook_id=playbook_id,
             playbook_parameters=effective_parameters,
             execution_mode=effective_execution_mode,
+            presentation_mode=presentation_mode,
+            prepared_dataset=prepared_dataset,
         )
 
     return _run_rule_based_workflow(
@@ -1678,6 +1893,8 @@ def run_agent_analysis(
         playbook_id=playbook_id,
         playbook_parameters=effective_parameters,
         execution_mode=effective_execution_mode,
+        presentation_mode=presentation_mode,
+        prepared_dataset=prepared_dataset,
     )
 
 

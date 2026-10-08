@@ -49,6 +49,7 @@ def estimate_adjusted_effect(
     treatment_col: str,
     outcome_col: str,
     covariates: list[str],
+    *, include_propensity: bool = False,
 ) -> dict[str, object]:
     """Estimate exploratory treatment effect with regression and simple weighting."""
 
@@ -57,8 +58,15 @@ def estimate_adjusted_effect(
     if missing:
         raise ValueError(f"Missing columns: {', '.join(sorted(missing))}")
 
-    working = df[[treatment_col, outcome_col, *covariates]].dropna().copy()
+    covariates = list(dict.fromkeys(column for column in covariates if column not in {treatment_col, outcome_col}))
+    working = df[[treatment_col, outcome_col, *covariates]].copy()
+    working[outcome_col] = pd.to_numeric(working[outcome_col], errors="coerce")
+    working = working.replace([np.inf, -np.inf], np.nan).dropna()
+    if working.empty:
+        raise ValueError("没有完整有效的处理、结果及协变量样本。")
     treatment = _treatment_as_binary(working[treatment_col]).rename("treatment_indicator")
+    if treatment.nunique() != 2:
+        raise ValueError("因果探索需要两个有效处理组。")
     outcome = pd.to_numeric(working[outcome_col], errors="coerce")
     covariate_frame = pd.get_dummies(working[covariates], drop_first=True, dtype=float)
     x = pd.concat([treatment, covariate_frame], axis=1)
@@ -67,12 +75,14 @@ def estimate_adjusted_effect(
     control = outcome[treatment == 0]
     naive_difference = float(treated.mean() - control.mean())
     adjusted_effect = _linear_effect(x, outcome, "treatment_indicator")
-    propensity_effect = _propensity_weighted_effect(covariate_frame, treatment, outcome)
+    propensity_effect = _propensity_weighted_effect(covariate_frame, treatment, outcome) if include_propensity else None
     caveats = [
         "该模块用于探索性分析。",
         "不能把相关性直接解释为因果关系。",
         "synthetic data 不代表真实业务结论。",
         "结果依赖已纳入的控制变量，未观测混杂仍可能存在。",
+        "需确认协变量先于处理发生，并检查两组协变量重叠性；回归调整不能证明因果。",
+        "倾向评分加权默认关闭，只有显式 include_propensity=True 才运行可选方法。",
     ]
     return {
         "estimated_effect": adjusted_effect,
@@ -80,5 +90,7 @@ def estimate_adjusted_effect(
         "adjusted_effect": adjusted_effect,
         "propensity_weighted_effect": propensity_effect,
         "sample_size": int(len(working)),
+        "covariates": list(covariates),
+        "method": "ordinary_least_squares_regression_adjustment",
         "caveats": caveats,
     }

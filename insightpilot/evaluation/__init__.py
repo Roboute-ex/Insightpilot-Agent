@@ -6,6 +6,7 @@ from insightpilot.evaluation.harness import (
     run_determinism_evaluation,
     run_safety_evaluation,
 )
+from insightpilot.evaluation.task_suite import run_task_evaluation
 from insightpilot.evaluation.models import EvaluationCase, EvaluationResult, EvaluationSuiteResult
 from insightpilot.evaluation.scorers import (
     ContractComplianceScorer,
@@ -38,4 +39,5 @@ __all__ = [
     "run_core_evaluation",
     "run_determinism_evaluation",
     "run_safety_evaluation",
+    "run_task_evaluation",
 ]

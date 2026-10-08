@@ -1,4 +1,4 @@
 """Package version."""
 
-__version__ = "0.6.0"
-__version_label__ = "v0.6 Semantic Analytics Graph, Multi-table Orchestration, Evaluation and Chinese-first UX"
+__version__ = "0.1.0"
+__version_label__ = "v0.1 历史能力恢复整合版"

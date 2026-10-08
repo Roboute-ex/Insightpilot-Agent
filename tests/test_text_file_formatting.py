@@ -30,7 +30,8 @@ def test_pyproject_is_multiline_and_parseable() -> None:
     text = _read("pyproject.toml")
     assert len(text.splitlines()) > 10
     parsed = tomllib.loads(text)
-    assert parsed["project"]["version"] == "0.6.0"
+    from insightpilot import __version__
+    assert parsed["project"]["version"] == __version__ == "0.1.0"
 
 
 def test_ci_yaml_is_multiline_and_structured() -> None:

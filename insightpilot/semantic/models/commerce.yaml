@@ -108,44 +108,60 @@ measures:
 
 metrics:
   total_revenue:
+    unit: 元
     metric_type: simple
     display_name: 总金额
     measure_id: order_revenue
     format: currency
   order_count:
+    unit: 单
     metric_type: simple
     display_name: 订单量
     measure_id: order_count_measure
   customer_count:
+    unit: 人
     metric_type: simple
     display_name: 客户数
     measure_id: customer_count_measure
   session_count:
+    unit: 次
     metric_type: simple
     display_name: 会话数
     measure_id: session_count_measure
+  revenue_per_session:
+    unit: 元/会话
+    metric_type: ratio
+    display_name: 每会话金额（独立事实汇总）
+    numerator_metric: total_revenue
+    denominator_metric: session_count
+    format: currency
   paid_session_count:
+    unit: 次
     metric_type: simple
     display_name: 支付完成会话数
     measure_id: paid_session_measure
   average_order_value:
+    unit: 元/单
     metric_type: ratio
     display_name: 平均每单金额
     numerator_metric: total_revenue
     denominator_metric: order_count
     format: currency
   session_conversion_rate:
+    unit: 比例
     metric_type: ratio
     display_name: 会话转化率
     numerator_metric: paid_session_count
     denominator_metric: session_count
     format: percent
   revenue_minus_orders:
+    unit: 混合单位（演示）
     metric_type: derived
     display_name: 金额与订单量差值示例
     input_metrics: [total_revenue, order_count]
     operation: subtract
   cumulative_revenue:
+    unit: 元
     metric_type: cumulative
     display_name: 累计金额
     base_metric: total_revenue

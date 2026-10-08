@@ -44,12 +44,12 @@ def detect_metric_anomaly(
     if date_col not in df.columns:
         raise ValueError(f"Missing date column: {date_col}")
 
-    working = df.copy()
+    working = df.loc[:,[date_col,metric_col]].copy()
     working[date_col] = pd.to_datetime(working[date_col])
     target = pd.Timestamp(target_date).normalize() if target_date is not None else working[date_col].max().normalize()
     daily = (
-        working.groupby(date_col)[metric_col]
-        .apply(lambda values: _aggregate(values, metric_col))
+        working.groupby(date_col,observed=True)[metric_col]
+        .agg("mean" if metric_col in MEAN_METRICS or metric_col.endswith(("_rate","_time")) else "sum")
         .reset_index(name="metric_value")
         .sort_values(date_col)
     )

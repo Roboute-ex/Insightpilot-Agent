@@ -16,12 +16,22 @@ ALLOWED_TIME_GRAINS = {"day", "week", "month"}
 @dataclass
 class ColumnMapping:
     table_name: str | None = None
+    source: str = "user_selected"
     date_column: str | None = None
     metric_columns: list[str] = field(default_factory=list)
     dimension_columns: list[str] = field(default_factory=list)
     group_column: str | None = None
     treatment_column: str | None = None
     outcome_column: str | None = None
+    covariates: list[str] = field(default_factory=list)
+    aggregation: str = "sum"
+    statistical_unit: str | None = None
+    deduplication_key: str | None = None
+    numerator_column: str | None = None
+    denominator_column: str | None = None
+    unit: str | None = None
+    timezone: str = "naive"
+    original_request: dict[str, Any] = field(default_factory=dict)
     time_grain: str = "day"
     notes: list[str] = field(default_factory=list)
 
@@ -99,6 +109,7 @@ def normalize_column_mapping(
         return ColumnMapping(notes=warnings)
 
     normalized = ColumnMapping(
+        source=str(raw.get("source") or "user_selected"),
         table_name=str(raw.get("table_name")) if raw.get("table_name") not in (None, "") else None,
         date_column=_valid_column(raw.get("date_column"), available_columns, warnings, "date_column"),
         metric_columns=_valid_columns(raw.get("metric_columns"), available_columns, warnings, "metric_columns"),
@@ -106,12 +117,24 @@ def normalize_column_mapping(
         group_column=_valid_column(raw.get("group_column"), available_columns, warnings, "group_column"),
         treatment_column=_valid_column(raw.get("treatment_column"), available_columns, warnings, "treatment_column"),
         outcome_column=_valid_column(raw.get("outcome_column"), available_columns, warnings, "outcome_column"),
+        covariates=_valid_columns(raw.get("covariates"), available_columns, warnings, "covariates"),
+        aggregation=str(raw.get("aggregation") or "sum"),
+        statistical_unit=("row" if raw.get("statistical_unit") == "row" else _valid_column(raw.get("statistical_unit"), available_columns, warnings, "statistical_unit")),
+        deduplication_key=_valid_column(raw.get("deduplication_key"), available_columns, warnings, "deduplication_key"),
+        numerator_column=_valid_column(raw.get("numerator_column"), available_columns, warnings, "numerator_column"),
+        denominator_column=_valid_column(raw.get("denominator_column"), available_columns, warnings, "denominator_column"),
+        unit=str(raw["unit"]) if raw.get("unit") else None,
+        timezone=str(raw.get("timezone") or "naive"),
+        original_request=dict(raw.get("original_request") or {key: value for key, value in raw.items() if key != "original_request"}),
         time_grain=str(raw.get("time_grain") or "day"),
         notes=_as_list(raw.get("notes")),
     )
     if normalized.time_grain not in ALLOWED_TIME_GRAINS:
         warnings.append(f"time_grain={normalized.time_grain} 不受支持，已回退到 day。")
         normalized.time_grain = "day"
+    if normalized.aggregation not in {"sum", "mean", "count", "count_distinct", "min", "max", "ratio_of_sums"}:
+        warnings.append("aggregation 不支持，已回退到 sum。")
+        normalized.aggregation = "sum"
     normalized.notes.extend(warnings)
     return normalized
 
@@ -145,6 +168,7 @@ def suggest_column_mapping(table_name: str, df: pd.DataFrame) -> ColumnMapping:
 
     suggestion = infer_schema_mapping(table_name, df)
     return ColumnMapping(
+        source="automatic_suggestion",
         table_name=table_name,
         date_column=next(iter(suggestion.detected_date_columns), None),
         metric_columns=list(suggestion.possible_metric_columns[:3]),

@@ -1,197 +1,57 @@
-# v0.6 中文演示脚本
+# 当前0.1.0工作台演示路径（2026-09-29）
 
-本演示只使用 synthetic data 或当前会话内存中的用户提供表。不要提交真实数据、上传文件、数据库查询结果或凭据。
+1. 内置交易模拟数据、standard。在分析工作台输入“昨日订单量为什么下降？”，查看自动推荐、真实数据范围与配置后点击开始分析。结论优先展示实际摘要、KPI、关键图、表和质量五维。
+2. 点击查看全部分析方法。默认十个方法可见；因果方法即使缺处理字段也显示缺口。配置方法不会执行或修改问题目标。合法24行因果小表经真实字段/方向配置后仍产生原始差2、调整估计2、n24；无协变量时不伪造调整。
+3. 进入数据探索，字段概览不重新统计。选择分组或交叉表、一个明确指标和sum/mean/去重或分子分母比率，确认范围后点击生成探索结果。图型切换只改变已有聚合的展示，参数编辑仍是草稿。
+4. 订单结果的城市表选择一行，查看筛选草稿，再点击基于选中分组继续分析。它创建所选城市目标日的描述性汇总子分支，不覆盖父配置，也不宣称因果或显著性。
+5. 历史比较中查看父子节点；超过现有单个大结果缓存后，旧节点提示需要重新执行。报告页依次按需生成PDF、Markdown、HTML、Excel、manifest、ZIP，均绑定选定成功run_id。
 
-## Demo 1：Synthetic 交易转化异常分析
+完整本轮真实测试与边界见[工作台验收](workbench_redesign_acceptance.md)。以下保留既有主Demo操作参考，其历史截图或成绩不是本轮成绩。
 
-数据来源：Synthetic demo data
+# 中文模拟数据演示脚本
 
-命令：
+本演示只使用本地确定性模拟数据，不上传业务数据。命令从项目根目录执行。
 
-```powershell
-.\.venv\Scripts\python.exe examples/run_demo.py --scenario transaction --goal-mode metric_diagnosis
-```
+## 1. 交易诊断与贡献
 
-预期输出：
-
-- route_taken 包含 `load_data_source`、`validate_tables`、`infer_schema`、`route_metric_diagnosis`、`run_anomaly`、`run_attribution`。
-- Streamlit standard 交易场景包含 180 天、34560 行日指标和 60001 行交易明细。
-- 结果明细包含指标对比、异常检测、漏斗拆解、维度贡献、证据链、建议和数据质量表。
-- Reviewer Score 为 PASS 区间。
-- Markdown Report 包含数据来源、表结构摘要和限制说明。
-
-注意事项：
-
-- 内置模拟数据中目标日期的多个城市、渠道、用户分层、设备版本和商户类型被注入可检测信号。
-- 归因排序用于定位优先排查方向，不代表最终因果结论。
-
-## Demo 2：Upload CSV
-
-数据来源：Upload CSV / Excel
-
-操作步骤：
-
-1. 准备一个 tiny synthetic CSV，例如包含 `date,value,city` 三列。
-2. 在 Streamlit 侧边栏选择 `Upload CSV / Excel`。
-3. 上传 CSV。
-4. 修改 table name。
-5. 查看 preview、schema mapping 和 warnings。
-6. 在 Metric / Column Mapping 面板选择 date、metric 和 dimension。
-7. 选择 `growth_trend`。
-8. 运行分析。
-
-CLI 示例：
+启动UI，简洁模式选择交易 standard、seed42，点击“预览分析方案”，确认只出现计划；再点击“开始分析”。
+检查实际摘要、指标当前/基准/变化、维度正负贡献、Others、证据与建议。不同维度贡献不可相加。
 
 ```powershell
-.\.venv\Scripts\python.exe examples/run_demo.py --data-source file --input-file data/sample.csv --table-name uploaded_table --goal-mode growth_trend
+& ./.venv/Scripts/python.exe -m insightpilot.cli --scenario transaction --scale standard --goal-mode metric_diagnosis --export-dir ./reports/demo_transaction
 ```
 
-带字段映射：
+## 2. 结果明细与实验
+
+打开结果明细确认指标/异常/贡献/证据等实际表。切换专业模式后，保留最近结果并提示数据切换的过期状态。
+选择内容场景的实验问题，执行后核对两组独立样本、均值、差、p-value和绝对差置信区间。实际数值由本次运行产生，不设置目标p-value。
 
 ```powershell
-.\.venv\Scripts\python.exe examples/run_demo.py --data-source file --input-file data/sample.csv --table-name uploaded_table --goal-mode growth_trend --date-column date --metric-columns value --dimension-columns city
+& ./.venv/Scripts/python.exe -m insightpilot.cli --scenario content --scale standard --goal-mode experiment_analysis --export-format pdf,markdown,html,excel,manifest,bundle --export-dir ./reports/demo_content
 ```
 
-预期输出：
+## 3. PDF优先导出
 
-- data_source 为 `uploaded_files`。
-- route_taken 包含 `generic_analysis_fallback`。
-- 如果识别到日期列和数值列，会输出通用趋势或异常摘要。
+报告导出页第一项为PDF；检查中文标题、正文、跨页表头和页码。再比较Excel实验sheet和CLI数值。ZIP不包含输入原表。
 
-注意事项：
+## 4. 自定义CSV映射
 
-- 上传文件默认只在当前会话内存中处理。
-- 不要把上传文件提交到仓库。
-
-## Demo 3：Upload Excel
-
-数据来源：Upload CSV / Excel
-
-操作步骤：
-
-1. 准备一个 tiny synthetic Excel 文件。
-2. 在 Streamlit 上传 Excel。
-3. 选择 sheet。
-4. 修改 table name。
-5. 查看 schema mapping。
-6. 在 Metric / Column Mapping 面板确认 date column 和 metric columns。
-7. 运行分析。
-
-CLI 示例：
+用 examples/generate_demo_files.py 在未使用过的 local_data/ 子目录生成 small 模拟文件，或手工创建少量 日期/销售额/城市 行。
+上传其中CSV，映射日期/指标/维度，执行增长趋势。换成无效字段时检查明确警告，不伪装完整结果。
 
 ```powershell
-.\.venv\Scripts\python.exe examples/run_demo.py --data-source file --input-file data/sample.xlsx --sheet-name Sheet1 --table-name uploaded_table --goal-mode growth_trend
+& ./.venv/Scripts/python.exe examples/generate_demo_files.py --scenario transaction --scale small --output-dir ./local_data/demo_files
 ```
 
-预期输出：
-
-- Excel sheet 被读取为一张 pandas DataFrame。
-- 报告包含表结构摘要和 schema warnings。
-
-注意事项：
-
-- Excel 读取依赖 openpyxl。
-- 如果 sheet 为空，会显示友好错误或 warning。
-
-## Demo 4：SQLite Query
-
-数据来源：Database query
-
-操作步骤：
-
-1. 准备一个 tiny synthetic SQLite 文件或使用测试生成数据。
-2. 在 Streamlit 选择 `Database query`。
-3. 输入 `sqlite:///path/to/local.db`。
-4. 输入只读 SQL，例如 `SELECT * FROM metrics`。
-5. 点击 `Test Query / Load Data`。
-6. 查看 preview、schema mapping 和 warnings。
-7. 在 Metric / Column Mapping 面板选择字段。
-8. 运行分析。
-
-CLI 示例：
+## 5. 多表方案预览
 
 ```powershell
-.\.venv\Scripts\python.exe examples/run_demo.py --data-source database --database-url sqlite:///local.db --query "SELECT * FROM metrics" --table-name db_table --goal-mode growth_trend
+& ./.venv/Scripts/python.exe -m insightpilot.cli --scenario multi_table_commerce --metrics total_revenue,order_count --dimensions customer_city --plan-only --output-format json --export-dir ./reports/demo_plan
 ```
 
-预期输出：
+检查表关系、粒度、风险、受控SQL摘要，确认没有分析查询或伪结果。请求变化需重新生成计划；不允许审批绕过不安全扇出。
 
-- data_source 为 `database`。
-- unsafe SQL 会被拒绝，不执行。
-- report 不展示明文密码。
+## 6. 直播与开发者模式
 
-注意事项：
-
-- database query 只允许单条 SELECT/WITH。
-- 不要提交真实数据库凭据或本地数据库文件。
-
-## Demo 5：Synthetic 内容与体验质量
-
-命令：
-
-```powershell
-.\.venv\Scripts\python.exe examples/run_demo.py --scenario content --goal-mode experiment_analysis
-.\.venv\Scripts\python.exe examples/run_demo.py --scenario live --goal-mode live_quality
-```
-
-预期输出：
-
-- content 场景包含 p_value、sample_size 和 reviewer 实验检查。
-- live 场景包含体验质量指标和维度归因。
-- 两个场景继续使用 synthetic data，不受 v0.3 ingestion 影响。
-
-## Demo 6：Analysis Playbook 与 Visual Diagnostics
-
-命令：
-
-```powershell
-.\.venv\Scripts\python.exe examples/run_demo.py --scenario transaction --playbook metric_trend --time-grain week --rolling-window 4
-```
-
-预期输出：
-
-- selected playbook 为 `metric_trend`。
-- route 包含 mapping validation、安全查询、playbook execution、chart generation 和 manifest。
-- Streamlit 的 Visual Diagnostics tab 展示趋势与滚动均值。
-- Reviewer 检查 playbook requirements、参数、查询安全和 manifest。
-
-## Demo 7：Export Bundle
-
-命令：
-
-```powershell
-.\.venv\Scripts\python.exe examples/run_demo.py --scenario transaction --playbook periodic_summary --export-format pdf,markdown,html,excel,manifest,bundle
-```
-
-预期输出：
-
-- CLI 输出 playbook、run_id、backend、reviewer score 和导出路径。
-- ZIP 包含 PDF、Markdown、HTML、Excel、manifest 和有限行数的分析结果 CSV。
-- bundle 不包含 synthetic 源表文件、上传文件或数据库连接信息。
-- 已存在文件不会被静默覆盖，会追加短 run ID。
-
-## Demo 8：多表语义指标与方案预览
-
-命令：
-
-```powershell
-.\.venv\Scripts\python.exe examples/run_demo.py --scenario multi_table --metric total_revenue --dimensions customer_city --plan-only
-```
-
-预期输出：
-
-- CLI 默认显示中文数据来源、分析目标、语义模型和查询计划编号。
-- QueryPlan 使用绑定参数，计划预览不执行 SQL。
-- JoinPlan 展示连接步骤、输出粒度和风险等级。
-- 切换为执行模式后，仅执行语义编译器生成的只读计划。
-
-## Streamlit v0.6 流程
-
-1. 选择数据来源并预览表。
-2. 对 custom data 配置 Column Mapping。
-3. 选择 goal mode 与 playbook。
-4. 在 form 中配置 playbook 参数并运行。
-5. 默认在简洁演示模式先查看执行摘要、核心指标、异常、贡献、漏斗和建议。
-6. 切换专业分析模式查看查询计划、连接方案、契约和血缘摘要。
-7. 切换开发者模式查看默认折叠的 JSON、SQL 模板和本地 span。
-8. 在报告导出页签准备内存导出；PDF 下载按钮排在第一位。
+运行直播质量问题，查看设备+网络组合、卡顿和观看时长。开发者模式才展开脱敏JSON/SQL/spans。
+完成后Ctrl+C停止Streamlit；报告和生成模拟文件均在忽略目录，不提交。

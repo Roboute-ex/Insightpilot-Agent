@@ -15,7 +15,7 @@ def test_plan_only_never_executes_and_high_risk_approval_is_bound_to_plan_id() -
     assert frame is None
     assert review.decision == "pending"
 
-    risky = compiler.compile(MetricRequest(metrics=["customer_count"], dimensions=["order_status"]))
+    risky = compiler.compile(MetricRequest(metrics=["customer_count"], dimensions=["order_status"]), tables=tables)
     assert risky.requires_approval is True
     stale = review_query_plan(risky, decision="approved", approved_plan_id="query_stale")
     assert stale.decision == "pending"

@@ -38,6 +38,10 @@ class TableContract:
     unique_key: list[str] = field(default_factory=list)
     severity: str = "error"
 
+    freshness_column: str | None = None
+    maximum_age_days: float | None = None
+    reference_time: str | None = None
+
     def __post_init__(self) -> None:
         if self.minimum_rows < 0:
             raise ValueError("minimum_rows 不能小于 0。")

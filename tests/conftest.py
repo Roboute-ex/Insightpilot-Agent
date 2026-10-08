@@ -69,3 +69,16 @@ def experiment_result(content_dataset):
         content_dataset.tables,
         goal_mode="experiment_analysis",
     )
+
+
+@pytest.fixture(autouse=True)
+def explicit_ui_synchronous_compatibility(monkeypatch):
+    """Existing AppTest suites validate synchronous compatibility; async tests remove this flag."""
+    monkeypatch.setenv("INSIGHTPILOT_UI_SYNC", "1")
+
+
+@pytest.fixture(autouse=True)
+def apptest_expander_browser_events(monkeypatch):
+    """Test-only native bool event compatibility; real browser checked separately."""
+    from ui_expander_support import install_expander_events
+    install_expander_events(monkeypatch)

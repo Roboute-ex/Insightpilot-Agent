@@ -51,18 +51,31 @@ def validate_playbook_parameters(
 
     errors = list(playbook.validate_mapping(mapping))
     definitions = {parameter.name: parameter for parameter in playbook.parameters}
+    exploration = parameters.get("exploration_request")
+    if "exploration_request" in parameters:
+        from insightpilot.analysis.exploration import validate_exploration_request
+        if playbook.playbook_id not in {"data_profile", "dimension_contribution"}:
+            errors.append("该分析剧本不支持单表探索请求。")
+        else:
+            errors.extend(validate_exploration_request(exploration, mapping, available_columns))
+            if isinstance(exploration, dict):
+                expected = "data_profile" if exploration.get("kind") == "distribution" else "dimension_contribution"
+                if playbook.playbook_id != expected:
+                    errors.append("探索类型与所选剧本不一致。")
     for name in playbook.required_parameter_names():
         if parameters.get(name) in (None, "", []):
             errors.append(f"缺少必填参数：{name}。")
 
     for name, value in parameters.items():
+        if name == "exploration_request":
+            continue
         definition = definitions.get(name)
         if definition is None:
             errors.append(f"不支持的 playbook 参数：{name}。")
             continue
         if value in (None, ""):
             continue
-        if definition.choices and value not in definition.choices:
+        if definition.choices and value not in definition.choices and not (exploration and name == "aggregation" and value == "ratio_of_sums"):
             errors.append(f"参数 {name} 必须是：{', '.join(map(str, definition.choices))}。")
         if definition.parameter_type == "column":
             if str(value) not in available_columns:
@@ -120,7 +133,7 @@ def validate_playbook_parameters(
         if group_count < 2:
             errors.append("group_column 至少需要两个有效分组。")
 
-    if dataframe is not None:
+    if dataframe is not None and exploration is None:
         metric_candidates = list(mapping.metric_columns)
         metric_parameter = parameters.get("metric")
         if metric_parameter:

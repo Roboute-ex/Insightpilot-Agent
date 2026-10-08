@@ -23,6 +23,8 @@ PARAMETER_TYPES = {
     "choice",
     "metric",
     "dimensions",
+    "sort",
+    "filters",
 }
 PLAYBOOK_STATUSES = {"PASS", "WARN", "FAIL"}
 

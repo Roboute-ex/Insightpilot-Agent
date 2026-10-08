@@ -34,7 +34,7 @@ def _validate_column(table_name: str, frame: pd.DataFrame, contract: ColumnContr
         elif expected in {"date", "datetime"}:
             dtype_passed = pd.api.types.is_datetime64_any_dtype(series)
         elif expected in {"string", "category"}:
-            dtype_passed = pd.api.types.is_object_dtype(series) or isinstance(series.dtype, pd.CategoricalDtype)
+            dtype_passed = pd.api.types.is_string_dtype(series) or pd.api.types.is_object_dtype(series) or isinstance(series.dtype, pd.CategoricalDtype)
         results.append(_check("column_type", object_name, actual_dtype, contract.data_type, dtype_passed, contract.severity, "检查字段类型。"))
     if not contract.nullable:
         missing = int(series.isna().sum())
@@ -53,7 +53,7 @@ def _validate_column(table_name: str, frame: pd.DataFrame, contract: ColumnContr
         results.append(_check("column_maximum", object_name, actual, contract.maximum, passed, contract.severity, "检查字段最大值。"))
     if contract.allowed_values:
         invalid = sorted(set(series.dropna().tolist()) - set(contract.allowed_values), key=str)
-        results.append(_check("column_allowed_values", object_name, invalid, contract.allowed_values, not invalid, contract.severity, "检查字段枚举范围。"))
+        results.append(_check("column_allowed_values", object_name, {"invalid_count": len(invalid)}, {"allowed_value_count": len(contract.allowed_values)}, not invalid, contract.severity, "检查字段枚举范围。"))
     return results
 
 
@@ -81,6 +81,18 @@ def validate_table_contract(frame: pd.DataFrame | None, contract: TableContract)
                 "检查表级唯一键。",
             )
         )
+    if contract.freshness_column:
+        if contract.reference_time is None or contract.maximum_age_days is None:
+            results.append(_check("table_freshness", contract.table_name, None, "explicit_reference", False, contract.severity, "freshness 必须配置明确参考时间及最大天数。"))
+        elif contract.freshness_column not in frame:
+            results.append(_check("table_freshness", contract.table_name, None, contract.maximum_age_days, False, contract.severity, "freshness 日期字段缺失。"))
+        else:
+            dates = pd.to_datetime(frame[contract.freshness_column], errors="coerce", utc=True)
+            reference = pd.Timestamp(contract.reference_time)
+            reference = reference.tz_localize("UTC") if reference.tzinfo is None else reference.tz_convert("UTC")
+            age = (reference - dates.max()).total_seconds() / 86400 if dates.notna().any() else None
+            passed = age is not None and 0 <= age <= contract.maximum_age_days
+            results.append(_check("table_freshness", contract.table_name, age, contract.maximum_age_days, passed, contract.severity, "使用明确参考时间检查数据新鲜度。"))
     return results
 
 

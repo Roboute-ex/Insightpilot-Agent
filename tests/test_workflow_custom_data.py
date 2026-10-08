@@ -59,6 +59,8 @@ def test_custom_experiment_without_required_fields_does_not_crash() -> None:
         data_source_type="uploaded_files",
         table_metadata=registry.metadata,
     )
-    assert result["findings"]
-    assert any("control/treatment" in finding for finding in result["findings"])
+    assert result["execution_status"] == "NEEDS_INPUT"
+    assert result["planning_status"] == "needs_clarification"
+    assert {item["role"] for item in result["clarification"]["items"]} >= {"group_column", "control_value", "treatment_value", "statistical_unit"}
+    assert not result["findings"] and not result["trace"]["executed_queries"]
     assert result["errors"] == []

@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "insightpilot-agent"
-version = "0.6.0"
+version = "0.1.0"
 description = "Synthetic-data-first semantic analytics workbench with multi-table planning, evaluation, and observability."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
   "pandas>=2.0",
   "numpy>=1.24",
@@ -20,16 +20,20 @@ dependencies = [
   "SQLAlchemy>=2.0",
   "PyYAML>=6.0",
   "reportlab>=4.0",
+  "pypdf>=6.19,<7",
+  "streamlit>=1.63",
+  "xlrd>=2.0.1",
+  "sqlglot>=26",
 ]
 
 [project.optional-dependencies]
-app = ["streamlit>=1.30"]
+app = ["streamlit>=1.63"]
 test = ["pytest>=8.0"]
 langgraph = ["langgraph>=0.2"]
 observability = ["opentelemetry-api>=1.20"]
 
 [tool.setuptools.packages.find]
-include = ["insightpilot*"]
+include = ["insightpilot*", "app*"]
 
 [tool.setuptools.package-data]
 "insightpilot.semantic" = ["models/*.yaml", "models/*.yml"]

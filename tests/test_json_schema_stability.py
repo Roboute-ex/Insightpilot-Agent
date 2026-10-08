@@ -37,7 +37,17 @@ def test_query_plan_and_manifest_keep_stable_english_keys() -> None:
         "executable",
         "warnings",
         "errors",
+        "model_fingerprint",
+        "data_fingerprint",
+        "compiler_version",
+        "sql_policy_version",
+        "entity_keys",
     }
+    assert len(query_plan["model_fingerprint"]) == 64
+    assert len(query_plan["data_fingerprint"]) == 64
+    assert query_plan["compiler_version"] == "0.1.0"
+    from insightpilot.tools.sql_safety import SQL_POLICY_VERSION
+    assert query_plan["sql_policy_version"] == SQL_POLICY_VERSION
     manifest = result["run_manifest"]
     assert {"manifest_version", "project_version", "run_id", "created_at", "workflow_backend", "route_taken", "semantic_model_id", "query_plan_id", "lineage_summary", "telemetry_summary"}.issubset(manifest)
     assert _all_dict_keys_are_ascii(query_plan)

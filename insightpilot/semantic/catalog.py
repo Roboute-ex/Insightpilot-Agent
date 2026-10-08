@@ -67,9 +67,13 @@ class SemanticCatalog:
         return {"models": [model.to_dict() for model in self.list_models()], "fingerprint": self.fingerprint()}
 
     def fingerprint(self) -> str:
-        payload = [model.to_dict() for model in self.list_models()]
+        payload = [model.computation_payload() for model in self.list_models()]
         content = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+    def presentation_fingerprint(self) -> str:
+        from insightpilot.metrics.definitions import stable_fingerprint
+        return stable_fingerprint([model.to_dict() for model in self.list_models()])
 
 
 def load_builtin_catalog() -> SemanticCatalog:

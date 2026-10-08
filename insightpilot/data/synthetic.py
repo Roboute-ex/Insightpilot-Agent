@@ -97,11 +97,11 @@ def _build_daily_metrics(rng: np.random.Generator) -> pd.DataFrame:
                 "refund_orders": refund_orders,
                 "refund_amount": round(refund_amount, 2),
                 "ctr": clicks / impressions if impressions else 0.0,
-                "cvr": orders / clicks if clicks else 0.0,
-                "conversion_rate": orders / visitors if visitors else 0.0,
-                "payment_success_rate": payment_success_rate,
-                "average_order_value": revenue / orders if orders else 0.0,
-                "refund_rate": refund_orders / orders if orders else 0.0,
+                "cvr": orders / visitors if visitors else np.nan,
+                "conversion_rate": orders / visitors if visitors else np.nan,
+                "payment_success_rate": successful_payments / payment_attempts if payment_attempts else np.nan,
+                "average_order_value": revenue / orders if orders else np.nan,
+                "refund_rate": refund_orders / orders if orders else np.nan,
                 "active_users": int(impressions * rng.uniform(0.18, 0.32)),
             }
         )
@@ -270,7 +270,7 @@ def generate_all_demo_data(seed: int = 42) -> dict[str, pd.DataFrame]:
     ].copy()
     content_items, content_events, experiments = _build_content_data(rng, users)
     live_sessions, live_quality_logs, live_interactions = _build_live_data(rng, users)
-    return {
+    tables = {
         "users": users,
         "traffic_events": traffic_events,
         "orders": orders,
@@ -282,6 +282,9 @@ def generate_all_demo_data(seed: int = 42) -> dict[str, pd.DataFrame]:
         "live_quality_logs": live_quality_logs,
         "live_interactions": live_interactions,
     }
+    for frame in tables.values():
+        frame.attrs["insightpilot_builtin_scenario"] = "legacy_demo"
+    return tables
 
 
 def generate_multi_table_commerce_data(seed: int = 42) -> dict[str, pd.DataFrame]:
@@ -384,7 +387,21 @@ def generate_multi_table_commerce_data(seed: int = 42) -> dict[str, pd.DataFrame
     calendar["week_start"] = calendar["date"].dt.to_period("W").dt.start_time
     calendar["month_start"] = calendar["date"].dt.to_period("M").dt.start_time
     calendar["week_number"] = calendar["date"].dt.isocalendar().week.astype(int)
+    # Observed synthetic events are generated from the nested session flags,
+    # not inferred from the order fact table. Each journey has explicit order/time.
+    event_frames = []
+    for stage_index, (flag, name) in enumerate([
+        ("visited", "visit"), ("viewed_product", "view"),
+        ("added_to_cart", "cart"), ("submitted_order", "submit"), ("paid", "paid"),
+    ]):
+        stage = sessions.loc[sessions[flag] == 1, ["session_id", "customer_id", "session_date"]].copy()
+        stage["event_name"] = name
+        stage["event_time"] = stage.pop("session_date") + pd.Timedelta(hours=12, minutes=stage_index * 2)
+        event_frames.append(stage)
+    events = pd.concat(event_frames, ignore_index=True).sort_values(["session_id", "event_time"]).reset_index(drop=True)
+    events.insert(0, "event_id", np.arange(1, len(events) + 1))
     return {
+        "events": events,
         "customers": customers,
         "sessions": sessions,
         "orders": orders,

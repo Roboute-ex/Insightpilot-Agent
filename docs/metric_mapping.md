@@ -1,6 +1,6 @@
 # Metric / Column Mapping
 
-v0.4 增加 Metric / Column Mapping，用于让用户在自定义数据中手动指定关键字段。v0.5 继续把 ColumnMapping 作为 Analysis Playbook 的统一输入契约。
+当前整合版 增加 Metric / Column Mapping，用于让用户在自定义数据中手动指定关键字段。当前整合版 继续把 ColumnMapping 作为 Analysis Playbook 的统一输入契约。
 
 ## 自动推断 vs 手动选择
 

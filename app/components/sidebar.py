@@ -32,17 +32,8 @@ def render_source_goal_backend(
         format_func=lambda value: t(f"source.{value}"),
         key="data_source_selector",
     )
-    goal_mode = st.sidebar.selectbox(
-        t("sidebar.goal_mode"),
-        goal_modes,
-        format_func=lambda value: t(f"goal.{value}", value),
-        help=help_text("analysis_goal_mode"),
-        key="goal_mode_selector",
-    )
-    backend = st.sidebar.selectbox(
-        t("sidebar.workflow_backend"),
-        ["rule_based", "langgraph"],
-        format_func=lambda value: t(f"backend.{value}"),
-        key="workflow_backend_selector",
-    )
+    # Goal and backend are retained as stable internal configuration, rendered
+    # only in the workbench's explicitly opened advanced settings.
+    goal_mode = st.session_state.get("goal_mode_selector", "auto")
+    backend = st.session_state.get("workflow_backend_selector", "rule_based")
     return str(source), str(goal_mode), backend == "langgraph"

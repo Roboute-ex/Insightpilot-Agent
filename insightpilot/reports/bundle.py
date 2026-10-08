@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import re
-from io import BytesIO
+from io import BytesIO, TextIOWrapper
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import pandas as pd
 
 from insightpilot.reports.pdf import generate_minimal_pdf_report
+from insightpilot.reports.safety import safe_report_result, safe_spreadsheet_frame
 
 
 MAX_CSV_TABLES = 20
@@ -32,6 +33,7 @@ def generate_export_bundle(
     """Build a safe report bundle without including source files or credentials."""
 
     buffer = BytesIO()
+    truncations: list[str] = []
     with ZipFile(buffer, "w", ZIP_DEFLATED) as archive:
         archive.writestr("report.md", markdown_report.encode("utf-8"))
         archive.writestr("report.html", html_report.encode("utf-8"))
@@ -50,10 +52,17 @@ def generate_export_bundle(
                     candidate = f"{safe_name}_{index}"
                     index += 1
                 used.add(candidate)
-                archive.writestr(
-                    f"results/{candidate}.csv",
-                    frame.head(MAX_CSV_ROWS).to_csv(index=False).encode("utf-8-sig"),
-                )
+                if len(frame) > MAX_CSV_ROWS:
+                    truncations.append(f"{candidate}.csv：原 {len(frame)} 行，导出前 {MAX_CSV_ROWS} 行。")
+                # Stream CSV encoding directly into the ZIP entry. The bounded
+                # safe frame remains, but no full CSV string+bytes pair is held.
+                safe_frame = safe_spreadsheet_frame(safe_report_result(frame.head(MAX_CSV_ROWS)))
+                with archive.open(f"results/{candidate}.csv", "w") as member:
+                    with TextIOWrapper(member, encoding="utf-8-sig", newline="") as text_stream:
+                        safe_frame.to_csv(text_stream, index=False)
+                del safe_frame
+        if len(result_tables) > MAX_CSV_TABLES:
+            truncations.append(f"结果表共 {len(result_tables)} 张，仅导出前 {MAX_CSV_TABLES} 张。")
         archive.writestr(
             "README.txt",
             (
@@ -61,6 +70,7 @@ def generate_export_bundle(
                 "内容：中文 PDF、Markdown、离线 HTML、Excel、运行清单和限制行数的分析结果 CSV。\n"
                 "导出包不包含上传源文件、完整数据库连接地址、密码或任何密钥。\n"
                 "运行清单仅用于复现配置，不能恢复原始输入数据。\n"
+                + "\n".join(truncations)
             ).encode("utf-8"),
         )
     return buffer.getvalue()

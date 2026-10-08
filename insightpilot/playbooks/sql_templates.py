@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable
+from insightpilot.metrics.aggregation import metric_components
 
 
-ALLOWED_AGGREGATIONS = {"sum": "SUM", "mean": "AVG", "count": "COUNT", "min": "MIN", "max": "MAX"}
+ALLOWED_AGGREGATIONS = {"sum": "SUM", "mean": "AVG", "count": "COUNT", "count_distinct": "COUNT", "min": "MIN", "max": "MAX"}
 ALLOWED_TIME_GRAINS = {"day", "week", "month"}
 
 
@@ -58,6 +59,23 @@ def _aggregation(value: str) -> str:
         raise ValueError(f"不支持的聚合方式：{value}") from exc
 
 
+
+def metric_aggregate_sql(metric: str, allowed_identifiers: set[str], aggregation: str = "sum") -> str:
+    if metric == "active_users":
+        if "user_id" not in allowed_identifiers:
+            raise ValueError("活跃用户数需要user_id明细去重，不能求和分组UV。")
+        return f"COUNT(DISTINCT {quote_identifier('user_id', allowed_identifiers)})"
+    pair = metric_components(metric, allowed_identifiers)
+    if pair:
+        numerator, denominator = pair
+        return f"SUM({quote_identifier(numerator, allowed_identifiers)}) / NULLIF(SUM({quote_identifier(denominator, allowed_identifiers)}), 0)"
+    if metric.endswith("_rate") or metric in {"ctr", "cvr"}:
+        if aggregation != "mean":
+            raise ValueError("该比率缺少分子分母，禁止求和；请补充原始计数或明确等权单位并选择 mean。")
+    if aggregation == "count_distinct":
+        return f"COUNT(DISTINCT {quote_identifier(metric, allowed_identifiers)})"
+    return f"{_aggregation(aggregation)}({quote_identifier(metric, allowed_identifiers)})"
+
 def _columns(value: str | list[str]) -> list[str]:
     return [value] if isinstance(value, str) else list(value)
 
@@ -97,7 +115,7 @@ def build_metric_trend_query(
     aggregate_sql = _aggregation(aggregation)
     date_sql = quote_identifier(date_column, allowlist)
     metric_sql = ", ".join(
-        f"{aggregate_sql}({quote_identifier(metric, allowlist)}) AS {quote_identifier(metric, allowlist)}"
+        f"{metric_aggregate_sql(metric, allowlist, aggregation)} AS {quote_identifier(metric, allowlist)}"
         for metric in metrics
     )
     where: list[str] = []
@@ -150,7 +168,7 @@ def build_period_comparison_query(
         group_dimension = ", dimension_value"
     sql = (
         f"SELECT {period_case} AS comparison_period{select_dimension}, "
-        f"{aggregate_sql}({metric_sql}) AS metric_value FROM {table_sql} "
+        f"{metric_aggregate_sql(metric_column, allowlist, aggregation)} AS metric_value FROM {table_sql} "
         f"WHERE ({date_sql} >= ? AND {date_sql} <= ?) OR ({date_sql} >= ? AND {date_sql} <= ?) "
         f"GROUP BY comparison_period{group_dimension} ORDER BY comparison_period{group_dimension}"
     )
@@ -179,7 +197,7 @@ def build_dimension_contribution_query(
     metric_sql = quote_identifier(metric_column, allowlist)
     aggregate_sql = _aggregation(aggregation)
     sql = (
-        f"SELECT {dimension_sql} AS dimension_value, {aggregate_sql}({metric_sql}) AS metric_value "
+        f"SELECT {dimension_sql} AS dimension_value, {metric_aggregate_sql(metric_column, allowlist, aggregation)} AS metric_value "
         f"FROM {table_sql} GROUP BY {dimension_sql} ORDER BY metric_value DESC LIMIT ?"
     )
     return SQLTemplateResult(

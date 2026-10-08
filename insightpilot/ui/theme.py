@@ -10,6 +10,12 @@ import streamlit as st
 
 COMPACT_THEME_CSS = """
 <style>
+/* Target the named caption component, never positional or deep layout selectors. */
+[data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] p,
+[data-testid="stCaptionContainer"] li {
+  font-size: 10.5pt !important;
+  line-height: 1.5;
+}
 .ip-summary-card {
   border: 1px solid #D7E0DE;
   border-radius: 6px;
@@ -36,9 +42,11 @@ COMPACT_THEME_CSS = """
   margin: 0;
   padding-left: 1.1rem;
 }
+.ip-method-title { font-size: 12pt; font-weight: 600; line-height: 1.4; overflow-wrap: anywhere; }
+.ip-workbench-title { font-size: 24px; line-height: 1.3; font-weight: 650; }
 .ip-summary-status {
   color: #0F766E;
-  font-size: 9.5pt;
+  font-size: 10.5pt;
   font-weight: 600;
   margin-top: 0.35rem;
 }

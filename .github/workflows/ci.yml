@@ -5,34 +5,30 @@ on:
   pull_request:
 
 jobs:
-  pytest:
-    runs-on: ubuntu-latest
+  validate:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ['3.11']
+    runs-on: ${{ matrix.os }}
+    env:
+      PYTHONUTF8: '1'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Set up Python 3.11
+      - name: Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Run pytest
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: python -m pip install -e ".[app,test]" build
+      - name: Test including UI interaction and ignore rules
         run: python -m pytest
-
       - name: Validate semantic models
         run: python -m insightpilot.semantic.validate
-
-      - name: Run local evaluation quality gates
+      - name: Core safety determinism
         run: python -m insightpilot.evaluation.cli --suite all
-
-      - name: Run Chinese UI smoke tests
-        run: |
-          python -m pytest tests/test_chinese_labels.py tests/test_streamlit_demo_mode.py
-
-      - name: Verify stable JSON schemas
-        run: python -m pytest tests/test_json_schema_stability.py
+      - name: Build distributions
+        run: python -m build
+      - name: Verify wheel and YAML without source imports
+        run: python scripts/check_distribution.py

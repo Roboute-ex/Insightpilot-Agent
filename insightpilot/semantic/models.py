@@ -7,7 +7,7 @@ from typing import Any
 
 
 CARDINALITIES = {"one_to_one", "one_to_many", "many_to_one", "many_to_many"}
-MEASURE_AGGREGATIONS = {"sum", "mean", "avg", "count", "count_distinct", "min", "max"}
+MEASURE_AGGREGATIONS = {"sum", "mean", "avg", "average", "count", "count_distinct", "min", "max"}
 METRIC_TYPES = {"simple", "ratio", "derived", "cumulative"}
 DERIVED_OPERATIONS = {"add", "subtract", "multiply", "divide"}
 
@@ -71,6 +71,16 @@ class SemanticMetric:
     operation: str | None = None
     base_metric: str | None = None
     format: str = "number"
+    definition_version: str = "0.1.0"
+    aliases: list[str] = field(default_factory=list)
+    unit: str = ""
+    statistical_unit: str | None = None
+    timezone: str = "naive"
+    valid_sample: str = "当前过滤范围内有效观测"
+    null_policy: str = "sql_aggregate_nulls"
+    zero_denominator_policy: str = "undefined"
+    definition_status: str = "draft"
+    source: str = "registered_definition"
 
     def __post_init__(self) -> None:
         if self.metric_type not in METRIC_TYPES:
@@ -130,6 +140,18 @@ class SemanticModel:
     metrics: dict[str, SemanticMetric]
     relationships: list[SemanticRelationship] = field(default_factory=list)
     description: str = ""
+
+    def computation_payload(self) -> dict[str, Any]:
+        from insightpilot.metrics.definitions import computation_payload
+        return computation_payload(self.to_dict())
+
+    def computation_fingerprint(self) -> str:
+        from insightpilot.metrics.definitions import stable_fingerprint
+        return stable_fingerprint(self.computation_payload())
+
+    def presentation_fingerprint(self) -> str:
+        from insightpilot.metrics.definitions import stable_fingerprint
+        return stable_fingerprint(self.to_dict())
 
     def validate(self) -> list[str]:
         errors: list[str] = []

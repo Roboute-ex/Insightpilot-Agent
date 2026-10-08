@@ -5,18 +5,20 @@ from __future__ import annotations
 import argparse
 import json
 
+from insightpilot.evaluation.task_suite import run_task_evaluation
 from insightpilot.evaluation.harness import run_core_evaluation, run_determinism_evaluation, run_safety_evaluation
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="运行 InsightPilot 本地评估套件。")
-    parser.add_argument("--suite", choices=["core", "safety", "determinism", "all"], default="all")
+    parser.add_argument("--suite", choices=["core", "safety", "determinism", "task", "all"], default="all")
     parser.add_argument("--output-format", choices=["text", "json"], default="text")
     args = parser.parse_args()
     runners = {
         "core": run_core_evaluation,
         "safety": run_safety_evaluation,
         "determinism": run_determinism_evaluation,
+        "task": run_task_evaluation,
     }
     selected = runners if args.suite == "all" else {args.suite: runners[args.suite]}
     results = {name: runner().to_dict() for name, runner in selected.items()}

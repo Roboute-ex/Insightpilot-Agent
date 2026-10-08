@@ -1,98 +1,70 @@
-"""A/B experiment analysis."""
-
+"""Experiment statistics computed at an explicitly reported independent unit."""
 from __future__ import annotations
-
-from math import erf, sqrt
-
 import numpy as np
 import pandas as pd
-
-try:
-    from scipy import stats
-except ImportError:  # pragma: no cover - dependency is declared for normal use
-    stats = None
-
-try:
-    from statsmodels.stats.proportion import proportions_ztest
-except ImportError:  # pragma: no cover - optional fallback is covered by logic
-    proportions_ztest = None
+from scipy import stats
 
 
-def _normal_two_sided_p(z_value: float) -> float:
-    cdf = 0.5 * (1.0 + erf(abs(z_value) / sqrt(2.0)))
-    return float(2.0 * (1.0 - cdf))
-
-
-def _conclusion(p_value: float, sample_size: dict[str, int]) -> str:
-    if min(sample_size.values()) < 30:
-        return "样本量偏小，结果仅适合继续观察，不应放大结论。"
-    if p_value < 0.05:
-        return "p-value < 0.05，内置模拟实验中存在统计显著差异；仍需结合长期稳定性继续观察。"
-    return "p-value >= 0.05，当前模拟样本未显示统计显著差异，建议继续观察或扩大样本。"
-
-
-def analyze_ab_test(
-    df: pd.DataFrame,
-    group_col: str,
-    metric_col: str,
-    metric_type: str = "mean",
-) -> dict[str, object]:
-    """Analyze control and treatment groups with deterministic statistics."""
-
-    if group_col not in df.columns or metric_col not in df.columns:
-        raise ValueError("Missing group or metric column")
-    groups = set(df[group_col].dropna().astype(str).unique())
-    if not {"control", "treatment"}.issubset(groups):
-        raise ValueError("Expected groups named control and treatment")
-
-    control = pd.to_numeric(df[df[group_col] == "control"][metric_col], errors="coerce").dropna().to_numpy()
-    treatment = pd.to_numeric(df[df[group_col] == "treatment"][metric_col], errors="coerce").dropna().to_numpy()
-    sample_size = {"control": int(len(control)), "treatment": int(len(treatment))}
-    control_mean = float(np.mean(control))
-    treatment_mean = float(np.mean(treatment))
-    absolute_lift = treatment_mean - control_mean
-    relative_lift = absolute_lift / control_mean if control_mean else 0.0
-
-    if metric_type == "proportion":
-        control_success = float(control.sum())
-        treatment_success = float(treatment.sum())
-        if proportions_ztest is not None:
-            _, p_value = proportions_ztest(
-                count=np.array([treatment_success, control_success]),
-                nobs=np.array([len(treatment), len(control)]),
-            )
-            p_value = float(p_value)
-        else:
-            pooled = (control_success + treatment_success) / (len(control) + len(treatment))
-            se = sqrt(max(pooled * (1 - pooled) * (1 / len(control) + 1 / len(treatment)), 1e-12))
-            p_value = _normal_two_sided_p(absolute_lift / se)
-        ci_se = sqrt(
-            max(
-                treatment_mean * (1 - treatment_mean) / len(treatment)
-                + control_mean * (1 - control_mean) / len(control),
-                1e-12,
-            )
-        )
-    elif metric_type == "mean":
-        if stats is not None:
-            _, p_value = stats.ttest_ind(treatment, control, equal_var=False, nan_policy="omit")
-            p_value = float(p_value)
-        else:
-            se = sqrt(max(np.var(treatment, ddof=1) / len(treatment) + np.var(control, ddof=1) / len(control), 1e-12))
-            p_value = _normal_two_sided_p(absolute_lift / se)
-        ci_se = sqrt(max(np.var(treatment, ddof=1) / len(treatment) + np.var(control, ddof=1) / len(control), 1e-12))
+def analyze_ab_test(df: pd.DataFrame, group_col: str, metric_col: str, metric_type: str = "mean", *, confidence_level: float = 0.95, statistical_unit: str | None = None, control_value: str = "control", treatment_value: str = "treatment") -> dict[str, object]:
+    if group_col not in df or metric_col not in df:
+        raise ValueError("缺少实验分组或结果字段，请补充字段映射。")
+    if metric_type not in {"mean", "proportion"} or not 0 < confidence_level < 1:
+        raise ValueError("实验类型或置信水平无效。")
+    if control_value == treatment_value:
+        raise ValueError("实验组与对照组不能相同。")
+    unit = None if statistical_unit == "row" else statistical_unit or next((column for column in ("user_id", "customer_id", "participant_id") if column in df), None)
+    limitations = ["统计显著性不等于业务重要性；上线前应复核随机化、长期稳定性及多重比较。"]
+    working = df[df[group_col].isin([control_value, treatment_value])].copy()
+    working[metric_col] = pd.to_numeric(working[metric_col], errors="coerce")
+    valid = working[metric_col].notna() & np.isfinite(working[metric_col])
+    excluded = int((~valid).sum())
+    working = working[valid]
+    if excluded:
+        limitations.append(f"排除 {excluded} 条缺失或非有限结果值。")
+    if unit:
+        if unit not in working or working[unit].isna().any():
+            raise ValueError("统计单位字段缺失或包含空值，无法确认独立样本。")
+        if (working.groupby(unit)[group_col].nunique() > 1).any():
+            raise ValueError("同一统计单位出现在多个实验组中，请检查随机化分配。")
+        if working[unit].duplicated().any():
+            if metric_type == "proportion":
+                raise ValueError("二元实验有重复统计单位，请先按明确的用户级成功定义汇总。")
+            working = working.groupby([unit, group_col], as_index=False)[metric_col].mean()
+            limitations.append("重复事件已按随机化单位取均值，每个单位贡献一个连续结果；请确认该口径。")
     else:
-        raise ValueError("metric_type must be 'mean' or 'proportion'")
-
-    confidence_interval = (float(absolute_lift - 1.96 * ci_se), float(absolute_lift + 1.96 * ci_se))
-    return {
-        "control_mean": control_mean,
-        "treatment_mean": treatment_mean,
-        "absolute_lift": absolute_lift,
-        "relative_lift": relative_lift,
-        "p_value": p_value,
-        "confidence_interval": confidence_interval,
-        "sample_size": sample_size,
-        "conclusion": _conclusion(p_value, sample_size),
-        "metric_type": metric_type,
-    }
+        limitations.append("未提供随机化单位字段，暂按每行一个单位计算；独立性尚未验证。")
+    control = working.loc[working[group_col] == control_value, metric_col].to_numpy(dtype=float)
+    treatment = working.loc[working[group_col] == treatment_value, metric_col].to_numpy(dtype=float)
+    sizes = {"control": len(control), "treatment": len(treatment)}
+    if min(sizes.values()) < 2:
+        raise ValueError("每组至少需要两个有效独立样本。")
+    if min(sizes.values()) < 30:
+        limitations.append("至少一组少于 30 个独立单位，结果存在低样本风险。")
+    cm, tm = float(control.mean()), float(treatment.mean())
+    diff = tm - cm
+    if metric_type == "proportion":
+        if not np.isin(np.concatenate([control, treatment]), [0, 1]).all():
+            raise ValueError("比例检验要求真实 0/1 二元结果；连续用户完播率请使用 mean。")
+        v1, v2 = cm * (1 - cm) / len(control), tm * (1 - tm) / len(treatment)
+        se = float(np.sqrt(v1 + v2))
+        critical = float(stats.norm.ppf(0.5 + confidence_level / 2))
+        p_value = float(2 * stats.norm.sf(abs(diff / se))) if se else (1.0 if diff == 0 else float(np.nextafter(0, 1)))
+        method = "用户级二元结果的非合并 Wald 比例差检验及同口径正态置信区间"
+        if min(control.sum(), treatment.sum(), len(control) - control.sum(), len(treatment) - treatment.sum()) < 5:
+            limitations.append("成功或失败事件少于 5，Wald 正态近似不稳定，应增加样本或复核精确方法。")
+        dfree = None
+    else:
+        v1, v2 = float(control.var(ddof=1) / len(control)), float(treatment.var(ddof=1) / len(treatment))
+        se = float(np.sqrt(v1 + v2))
+        denominator = v1 * v1 / (len(control) - 1) + v2 * v2 / (len(treatment) - 1)
+        dfree = (v1 + v2) ** 2 / denominator if denominator else float("inf")
+        critical = float(stats.t.ppf(0.5 + confidence_level / 2, dfree))
+        p_value = float(2 * stats.t.sf(abs(diff / se), dfree)) if se else (1.0 if diff == 0 else float(np.nextafter(0, 1)))
+        method = "Welch t-test；置信区间使用同一有效样本和 Welch–Satterthwaite 自由度"
+    if se == 0:
+        limitations.append("两组均为零方差，常规推断的适用性有限。")
+    p_value = max(float(np.nextafter(0, 1)), p_value)
+    ci = (float(diff - critical * se), float(diff + critical * se))
+    significant = p_value < 1 - confidence_level
+    conclusion = "当前样本显示统计差异，仍需验证随机化、长期稳定性及业务意义。" if significant else "当前样本未显示统计差异；非显著不等于没有效果。"
+    return {"control_mean": cm, "treatment_mean": tm, "absolute_lift": diff, "relative_lift": diff / cm if cm else None, "p_value": p_value, "confidence_interval": ci, "sample_size": sizes, "conclusion": conclusion, "metric_type": metric_type, "confidence_level": confidence_level, "method": method, "statistical_unit": unit or "row (independence unverified)", "randomization_unit": unit, "standard_error": se, "degrees_of_freedom": dfree, "is_significant": significant, "limitations": limitations, "excluded_rows": excluded, "confidence_interval_type": "absolute_difference_treatment_minus_control"}

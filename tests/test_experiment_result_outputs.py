@@ -46,7 +46,13 @@ def test_experiment_markdown_and_html_show_complete_statistics(experiment_result
     for output in (markdown, html):
         for marker in ("实验分析结果", "实验组", "对照组", "样本量", "lift", "p-value", "95% 置信区间", "显著性结论"):
             assert marker in output
-        assert "completion_rate" not in output
+        # The new definition/source section deliberately preserves the registered
+        # identifier/expression. The actual statistics narrative stays Chinese.
+        section = (output.split("## 实验分析结果", 1)[1].split("\n## ", 1)[0]
+                   if output.startswith("#") else output.split("<section><h2>实验分析结果</h2>", 1)[1].split("</section>", 1)[0])
+        assert "completion_rate" not in section
+        for marker in ("实验组", "对照组", "样本量", "lift", "p-value", "95% 置信区间", "显著性结论"):
+            assert marker in section
 
 
 def test_experiment_pdf_receives_complete_statistics(experiment_result, monkeypatch) -> None:

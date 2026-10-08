@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
+from insightpilot.reports.definitions import bind_report_metadata, definition_cards
+from insightpilot.analysis.quality import QUALITY_NOTICE, quality_rows
+
 from typing import Any
+
+from insightpilot.reports.safety import report_result_view
+
+from insightpilot.ui.experiment_display import experiment_display, finite_number
+from insightpilot.ui.table_labels import localize_result_value
 
 from insightpilot.ui.formatters import (
     format_enum_value,
@@ -189,8 +197,8 @@ def _comparison_lines(result: dict[str, object]) -> str:
     rows = _package_records(result, "metric_comparisons")
     return _bullets([
         f"{format_metric_name(item.get('metric_id'))}："
-        f"当前 {float(item.get('current_value', 0)):,.4g}，基准 {float(item.get('baseline_value', 0)):,.4g}，"
-        f"变化 {float(item.get('relative_change', 0)):.1%}，等级 {item.get('severity')}"
+        f"当前 {finite_number(item.get('current_value'))}，基准 {finite_number(item.get('baseline_value'))}，"
+        f"变化 {finite_number(item.get('relative_change'), percent=True)}，等级 {localize_result_value(item.get('severity'), 'severity')}"
         for item in rows[:20]
     ], "- 暂无指标对比结果")
 
@@ -201,20 +209,7 @@ def _experiment_lines(result: dict[str, object]) -> str:
         return "- 当前分析不包含实验组与对照组比较。"
     lines: list[str] = []
     for item in rows:
-        metric_id = str(item.get("metric_id", ""))
-        is_rate = metric_id.endswith("_rate") or metric_id in {"ctr", "cvr", "conversion_rate"}
-        value = lambda number: f"{float(number or 0):.2%}" if is_rate else f"{float(number or 0):,.4g}"
-        lines.extend(
-            [
-                f"- 分析指标：{format_metric_name(metric_id)}",
-                f"- 实验组：{value(item.get('treatment_value'))}，样本量 {int(item.get('treatment_sample_size', 0)):,}",
-                f"- 对照组：{value(item.get('control_value'))}，样本量 {int(item.get('control_sample_size', 0)):,}",
-                f"- lift：绝对 {value(item.get('absolute_lift'))}，相对 {float(item.get('relative_lift', 0)):.2%}",
-                f"- p-value：{float(item.get('p_value', 1)):.6g}",
-                f"- 95% 置信区间：[{value(item.get('confidence_interval_lower'))}, {value(item.get('confidence_interval_upper'))}]",
-                f"- 显著性结论：{item.get('significance_conclusion')}",
-            ]
-        )
+        lines.extend(f"- {label}：{value}" for label, value in experiment_display(item).items())
     return "\n".join(lines)
 
 
@@ -225,12 +220,15 @@ def _structured_lines(result: dict[str, object], key: str, formatter: Any, fallb
 def generate_markdown_report(result: dict[str, object]) -> str:
     """Generate a Chinese-first report without changing result or manifest keys."""
 
+    quality = quality_rows(result)
+    result = report_result_view(result)
+
     plan = result.get("plan") if isinstance(result.get("plan"), dict) else {}
     caveats = [translate_caveat(item) for item in _as_list(result.get("caveats") or result.get("limitations"))]
     route = format_route_steps([str(item) for item in _as_list(result.get("route_taken"))])
     selected = result.get("selected_playbook") if isinstance(result.get("selected_playbook"), dict) else {}
     export_lines = (
-        "- 可按需生成 Markdown、离线 HTML、Excel、运行清单 JSON 和完整压缩包。"
+        "- 可按需生成 PDF、Markdown、离线 HTML、Excel、运行清单 JSON 和完整压缩包。"
         if selected
         else "- 选择分析剧本后可按需准备完整导出文件。"
     )
@@ -242,6 +240,9 @@ def generate_markdown_report(result: dict[str, object]) -> str:
             "## 执行摘要",
             format_metric_text((result.get("analysis_result_package") or {}).get("executive_summary") if isinstance(result.get("analysis_result_package"), dict) else result.get("summary", "")),
             "",
+            "## 指标口径与出处",
+            "\n\n".join("\n".join(f"- {key}：{value}" for key, value in card.items()) for card in definition_cards(result)) or "- 本次运行没有完整口径卡，请复核原映射。",
+            "",
             "## 实验分析结果",
             _experiment_lines(result),
             "",
@@ -249,13 +250,13 @@ def generate_markdown_report(result: dict[str, object]) -> str:
             _comparison_lines(result),
             "",
             "## 异常检测结果",
-            _structured_lines(result, "anomalies", lambda item: f"{format_metric_name(item.get('metric_id'))}：实际值 {float(item.get('actual_value', 0)):,.4g}，预期值 {float(item.get('expected_value', 0)):,.4g}，等级 {item.get('severity')}", "- 暂无异常检测结果"),
+            _structured_lines(result, "anomalies", lambda item: f"{format_metric_name(item.get('metric_id'))}：实际值 {finite_number(item.get('actual_value'))}，预期值 {finite_number(item.get('expected_value'))}，等级 {localize_result_value(item.get('severity'), 'severity')}", "- 暂无异常检测结果"),
             "",
             "## 漏斗拆解",
-            _structured_lines(result, "funnel_results", lambda item: f"{item.get('stage_name')}：转化率变化 {float(item.get('rate_change_pp', 0)):.2f} 个百分点，估算订单影响 {float(item.get('estimated_order_impact', 0)):.2f}，贡献占比 {float(item.get('contribution_pct', 0)):.1%}", "- 当前分析类型不适用交易漏斗拆解"),
+            _structured_lines(result, "funnel_results", lambda item: f"{item.get('stage_name')}：转化率变化 {finite_number(item.get('rate_change_pp'))} 个百分点，估算订单影响 {finite_number(item.get('estimated_order_impact'))}，贡献占比 {finite_number(item.get('contribution_pct'), percent=True)}", "- 当前分析类型不适用交易漏斗拆解"),
             "",
             "## 维度贡献",
-            _structured_lines(result, "dimension_contributions", lambda item: f"{item.get('dimension')}={item.get('dimension_value')}：贡献值 {float(item.get('contribution_value', 0)):.3g}，贡献占比 {float(item.get('contribution_pct', 0)):.1%}", "- 暂无维度贡献结果"),
+            _structured_lines(result, "dimension_contributions", lambda item: f"{item.get('dimension')}={item.get('dimension_value')}：贡献值 {finite_number(item.get('contribution_value'))}，贡献占比 {finite_number(item.get('contribution_pct'), percent=True)}", "- 暂无维度贡献结果"),
             "",
             "## 证据链",
             _structured_lines(result, "evidence", lambda item: f"{item.get('evidence_id')}：{item.get('claim')}", "- 暂无结构化证据"),
@@ -263,18 +264,29 @@ def generate_markdown_report(result: dict[str, object]) -> str:
             "## 建议清单",
             _structured_lines(result, "recommendations", lambda item: f"[{item.get('priority')}] {item.get('action')}；证据：{'、'.join(item.get('supporting_evidence_ids', []))}", "- 暂无证据绑定建议"),
             "",
-            "## 1. 分析问题（用户问题）",
+            "## 分析质量检查（Reviewer 结果）",
+            _reviewer_lines(result.get("reviewer")),
+            QUALITY_NOTICE,
+            "\n".join(f"- {row['检查维度']}：{row['状态']}；{row['依据与边界']}" for row in quality),
+            "",
+            "## 数据质量与 Contract",
+            _contract_lines(result.get("contract_results")),
+            "",
+            "## 风险与限制（限制说明）",
+            _bullets(caveats, "- 当前未提供额外限制说明。"),
+            "",
+            "## 分析问题（用户问题）",
             str(result.get("question", "")),
             "",
-            "## 2. 数据来源",
+            "## 数据来源",
             f"- 数据来源：{format_enum_value('data_source', result.get('data_source_type'))}",
             _metadata_lines(result.get("table_metadata")),
             "",
-            "## 3. 分析目标（分析目标模式）",
+            "## 分析目标（分析目标模式）",
             f"- 分析目标模式：{format_enum_value('goal_mode', result.get('goal_mode'))}",
             f"- 来源：{'用户选择' if result.get('goal_mode_source') == 'user_selected' else '自动识别'}",
             "",
-            "## 4. 分析方案（分析计划）",
+            "## 分析方案（分析计划）",
             _plan_lines(plan),
             "",
             "### 字段映射",
@@ -283,42 +295,33 @@ def generate_markdown_report(result: dict[str, object]) -> str:
             "### 执行路径（Route Taken）",
             _bullets(route),
             "",
-            "## 5. 语义指标（识别指标）",
+            "## 语义指标（识别指标）",
             _metric_lines(result),
             "",
             "### 查询计划",
             _query_lines(result.get("query_plan")),
             "",
-            "## 6. 多表连接方案",
+            "## 多表连接方案",
             _join_lines(result.get("join_plan")),
             "",
-            "## 7. 核心发现",
+            "## 核心发现",
             _bullets([format_metric_text(item) for item in _as_list(result.get("findings"))]),
             "",
-            "## 8. 可视化诊断（Visual Diagnostics）",
+            "## 可视化诊断（Visual Diagnostics）",
             _bullets([str(item.get("title")) for item in _as_list(result.get("chart_specs")) if isinstance(item, dict)], "- 暂无可用图表规格。"),
             "",
-            "## 9. 分析质量检查（Reviewer 结果）",
-            _reviewer_lines(result.get("reviewer")),
-            "",
-            "## 10. 数据质量与 Contract",
-            _contract_lines(result.get("contract_results")),
-            "",
-            "## 11. 风险与限制（限制说明）",
-            _bullets(caveats, "- 当前未提供额外限制说明。"),
-            "",
-            "## 12. 数据血缘",
+            "## 数据血缘",
             _lineage_lines(result.get("lineage")),
             "",
-            "## 13. 运行摘要（Trace 摘要）",
+            "## 运行摘要（Trace 摘要）",
             _observability_lines(result),
             "",
-            "## 14. 可复现配置（Run Manifest）",
+            "## 可复现配置（Run Manifest）",
             f"- 运行清单版本：{result.get('run_manifest', {}).get('manifest_version', '暂无') if isinstance(result.get('run_manifest'), dict) else '暂无'}",
             f"- 分析剧本：{format_enum_value('playbook', selected.get('playbook_id') or '未选择')}",
             f"- 导出说明：{export_lines.removeprefix('- ')}",
             "",
-            "## 15. 后续建议（下一步建议）",
+            "## 后续建议（下一步建议）",
             _bullets(result.get("next_steps"), "- 继续复核指标口径、数据质量和不确定性边界。"),
             "",
         ]

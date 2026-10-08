@@ -37,7 +37,7 @@ def test_markdown_and_html_reports_are_chinese_first() -> None:
 def test_excel_and_zip_readme_are_chinese_first_with_compatibility_aliases() -> None:
     result = _semantic_result()
     manifest = RunManifest.from_dict(result["run_manifest"])
-    excel = generate_excel_report(result, manifest)
+    excel = generate_excel_report(result, manifest, compatibility_mode=True)
     workbook = openpyxl.load_workbook(BytesIO(excel), read_only=True)
     assert {"分析摘要", "核心发现", "质量检查", "字段映射", "查询计划", "数据血缘", "运行清单"}.issubset(workbook.sheetnames)
     assert {"Summary", "Findings", "Reviewer", "Mapping", "Manifest"}.issubset(workbook.sheetnames)

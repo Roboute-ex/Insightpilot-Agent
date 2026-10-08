@@ -1,6 +1,6 @@
 # Data Ingestion
 
-v0.3 支持三类数据来源：
+当前整合版 支持三类数据来源：
 
 - Synthetic demo data
 - CSV / Excel upload
@@ -40,7 +40,7 @@ v0.3 支持三类数据来源：
 
 ## Metric / Column Mapping
 
-v0.4 在 schema mapping 之后增加 ColumnMapping。用户可以在 Streamlit 或 CLI 中手动选择：
+当前整合版 在 schema mapping 之后增加 ColumnMapping。用户可以在 Streamlit 或 CLI 中手动选择：
 
 - date_column
 - metric_columns

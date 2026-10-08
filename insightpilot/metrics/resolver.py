@@ -6,6 +6,14 @@ from insightpilot.metrics.dictionary import MetricDefinition, get_metric, get_me
 
 
 KEYWORD_RULES: list[tuple[tuple[str, ...], tuple[str, ...]]] = [
+    (("退款", "refund"), ("refund_rate", "refund_orders", "refund_amount")),
+    (("客单价", "aov"), ("average_order_value", "revenue")),
+    (("崩溃", "crash"), ("crash_rate",)),
+    (("启动", "延迟", "latency"), ("startup_latency",)),
+    (("点赞",), ("likes",)),
+    (("评论",), ("comments",)),
+    (("分享",), ("shares",)),
+    (("关注",), ("follows",)),
     (("订单", "下单", "交易", "order", "orders"), ("orders", "cvr", "payment_success_rate")),
     (("转化", "cvr", "conversion"), ("cvr", "ctr", "orders")),
     (("支付", "payment"), ("payment_success_rate", "orders")),
@@ -33,7 +41,7 @@ def resolve_metrics_from_question(question: str) -> list[MetricDefinition]:
                     selected_names.append(metric_name)
 
     if not selected_names:
-        selected_names = ["active_users", "revenue"]
+        selected_names = []
 
     metric_dict = get_metric_dictionary()
     return [metric_dict[name] for name in selected_names if name in metric_dict]

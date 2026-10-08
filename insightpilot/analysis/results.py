@@ -54,6 +54,10 @@ class FunnelStageResult:
     estimated_order_impact: float
     contribution_pct: float
     severity: str
+    net_change_contribution: float | None = None
+    decomposition_order: int = 0
+    residual_error: float = 0.0
+    method: str = ""
 
 
 @dataclass(frozen=True)
@@ -84,7 +88,7 @@ class ExperimentComparisonResult:
     treatment_sample_size: int
     total_sample_size: int
     absolute_lift: float
-    relative_lift: float
+    relative_lift: float | None
     p_value: float
     confidence_interval_lower: float
     confidence_interval_upper: float
@@ -92,6 +96,9 @@ class ExperimentComparisonResult:
     is_significant: bool
     significance_conclusion: str
     method: str
+    statistical_unit: str = "未确认"
+    limitations: tuple[str, ...] = ()
+    metric_type: str = "mean"
 
 
 @dataclass(frozen=True)
@@ -135,6 +142,7 @@ class AnalysisResultPackage:
     chart_specs: list[dict[str, Any]] = field(default_factory=list)
     caveats: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+    execution_status: str = "COMPLETED"
 
     def result_table_summaries(self) -> dict[str, dict[str, Any]]:
         return {
@@ -147,7 +155,9 @@ class AnalysisResultPackage:
         }
 
     def to_dict_summary(self) -> dict[str, Any]:
-        return {
+        from insightpilot.reports.manifest import sanitize_manifest_value
+        return sanitize_manifest_value({
+            "execution_status": self.execution_status,
             "run_id": self.run_id,
             "scenario": self.scenario,
             "question": self.question,
@@ -164,7 +174,7 @@ class AnalysisResultPackage:
             "caveats": list(self.caveats),
             "metadata": dict(self.metadata),
             "has_structured_results": self.has_structured_results(),
-        }
+        })
 
     def validate(self) -> list[str]:
         issues: list[str] = []

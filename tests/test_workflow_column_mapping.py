@@ -85,6 +85,7 @@ def test_experiment_analysis_uses_group_and_metric_mapping() -> None:
         goal_mode="experiment_analysis",
         data_source_type="uploaded_files",
         table_metadata=registry.metadata,
+        clarification_answers={"statistical_unit": "row", "control_value": "control", "treatment_value": "treatment"},
         column_mapping={
             "table_name": "experiment_table",
             "group_column": "group",
@@ -105,6 +106,7 @@ def test_causal_exploration_uses_treatment_and_outcome_mapping() -> None:
         goal_mode="causal_exploration",
         data_source_type="uploaded_files",
         table_metadata=registry.metadata,
+        playbook_parameters={"control_value": "control", "treatment_value": "treatment"},
         column_mapping={
             "table_name": "experiment_table",
             "treatment_column": "group",
@@ -131,6 +133,6 @@ def test_invalid_mapping_produces_warnings_without_crashing() -> None:
             "metric_columns": ["missing_metric"],
         },
     )
-    assert result["findings"]
+    assert result["execution_status"] == "INVALID_INPUT"
     assert result["mapping_warnings"]
-    assert result["reviewer"]["status"] in {"WARN", "PASS"}
+    assert not result["findings"] and not result["trace"]["executed_queries"]

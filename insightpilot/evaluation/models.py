@@ -13,6 +13,12 @@ class EvaluationCase:
     description: str
     runner: Callable[[], dict[str, Any]]
     minimum_score: float = 1.0
+    family: str = ""
+    question: str = ""
+    input_fixture: dict[str, Any] = field(default_factory=dict)
+    expected: dict[str, Any] = field(default_factory=dict)
+    required_evidence: tuple[str, ...] = ()
+    forbidden_behaviors: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -25,6 +31,7 @@ class EvaluationResult:
     duration_ms: float = 0.0
     errors: list[str] = field(default_factory=list)
     actual_summary: dict[str, Any] = field(default_factory=dict)
+    family: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -39,14 +46,20 @@ class EvaluationSuiteResult:
 
     @property
     def passed(self) -> bool:
-        return all(result.status != "FAIL" for result in self.results)
+        return bool(self.results) and all(result.status == "PASS" for result in self.results)
 
     def to_dict(self) -> dict[str, Any]:
         passed = sum(result.status == "PASS" for result in self.results)
         warned = sum(result.status == "WARN" for result in self.results)
         failed = sum(result.status == "FAIL" for result in self.results)
         slowest = max(self.results, key=lambda result: result.duration_ms).case_id if self.results else ""
+        families: dict[str, dict[str, int]] = {}
+        for result in self.results:
+            if result.family:
+                counts = families.setdefault(result.family, {"PASS": 0, "WARN": 0, "FAIL": 0})
+                counts[result.status] += 1
         return {
+            "task_families": families,
             "suite": self.suite,
             "overall_score": self.overall_score,
             "passed": self.passed,

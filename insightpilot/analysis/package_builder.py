@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+from insightpilot.performance_tasks import cancellation_checkpoint
+from insightpilot.observability.tracer import trace_stage
+
 from dataclasses import asdict
+import math
 import re
 from typing import Any
 
 import pandas as pd
 
 from insightpilot.analysis.dimension_contribution import dimension_contribution_results
+from insightpilot.analysis.associations import quality_conversion_association
 from insightpilot.analysis.experiments import analyze_ab_test
 from insightpilot.analysis.funnel_decomposition import decompose_transaction_funnel
 from insightpilot.analysis.metric_diagnosis import METRIC_NAMES, diagnose_metrics
@@ -41,8 +46,10 @@ def _main_comparisons(values: list[MetricComparisonResult]) -> list[MetricCompar
 def _quality_table(state: Any, tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     for name, frame in tables.items():
-        missing = int(frame.isna().sum().sum())
-        duplicates = int(frame.duplicated().sum())
+        with trace_stage("result_quality_scan",table=name,rows=len(frame),columns=len(frame.columns)):
+            missing = int(frame.isna().sum().sum())
+            cancellation_checkpoint()
+            duplicates = int(frame.duplicated().sum())
         if missing or duplicates:
             rows.append({
                 "table": name,
@@ -126,7 +133,7 @@ def _executive_summary(
     contributions: list[DimensionContributionResult],
 ) -> str:
     main = {item.metric_id: item for item in _main_comparisons(comparisons)}
-    primary = main.get("orders") or main.get("completion_rate") or main.get("buffering_rate") or main.get("stutter_rate") or next(iter(main.values()), None)
+    primary = next(iter(main.values()), None)
     if primary is None:
         return "本次执行已生成结构化结果，当前数据不足以形成稳定的指标对比摘要。"
     sentence = (
@@ -176,10 +183,19 @@ def _tables_from_package(
 
 def _transaction_package(state: Any, tables: dict[str, pd.DataFrame]) -> AnalysisResultPackage:
     frame = tables["daily_metrics"]
-    metrics = [metric for metric in ["orders", "revenue", "impressions", "conversion_rate", "cvr", "payment_success_rate", "refund_rate"] if metric in frame.columns]
+    selected = getattr(state, "column_mapping", {}).get("metric_columns", [])
+    metrics = [metric for metric in (selected or ["orders", "revenue", "impressions", "conversion_rate", "cvr", "payment_success_rate", "refund_rate"]) if metric in frame.columns]
     if "conversion_rate" in metrics and "cvr" in metrics:
         metrics.remove("cvr")
-    comparisons, anomalies = diagnose_metrics(frame, metrics)
+    comparisons, anomalies = diagnose_metrics(frame, [metric for metric in metrics if metric != "active_users"])
+    if "active_users" in metrics:
+        detail = tables.get("transaction_detail", tables.get("orders", pd.DataFrame()))
+        if {"date", "user_id"}.issubset(detail.columns):
+            user_comparisons, user_anomalies = diagnose_metrics(detail.assign(active_users=1), ["active_users"])
+            comparisons = user_comparisons + comparisons
+            anomalies = user_anomalies + anomalies
+        else:
+            state.caveats.append("活跃用户数缺少日期/user_id明细，不能合计分组UV。")
     funnel: list[FunnelStageResult] = []
     try:
         funnel = decompose_transaction_funnel(frame)
@@ -212,9 +228,10 @@ def _transaction_package(state: Any, tables: dict[str, pd.DataFrame]) -> Analysi
 
 def _content_package(state: Any, tables: dict[str, pd.DataFrame]) -> AnalysisResultPackage:
     frame = tables.get("content_daily_metrics", tables.get("content_events", pd.DataFrame()))
-    metrics = [metric for metric in ["completion_rate", "engagement_rate", "ctr", "watch_time"] if metric in frame.columns]
+    selected = getattr(state, "column_mapping", {}).get("metric_columns", [])
+    metrics = [metric for metric in (selected or ["completion_rate", "engagement_rate", "ctr", "watch_time"]) if metric in frame.columns]
     comparisons, anomalies = diagnose_metrics(frame, metrics)
-    metric = "completion_rate" if "completion_rate" in frame.columns else metrics[0] if metrics else ""
+    metric = metrics[0] if metrics else ""
     dimensions = [value for value in ["content_category", "author_tier", "device", "acquisition_channel", "channel", "user_segment", "app_version"] if value in frame.columns]
     contributions = dimension_contribution_results(frame, metric, dimensions, include_drilldown=False) if metric else []
     evidence = _evidence_from_results(comparisons, anomalies, [], contributions)
@@ -239,9 +256,11 @@ def _content_package(state: Any, tables: dict[str, pd.DataFrame]) -> AnalysisRes
 
 
 def _live_package(state: Any, tables: dict[str, pd.DataFrame]) -> AnalysisResultPackage:
+    state.caveats.append("主播开播场次按broadcast_id，观看会话按session_id，观测去重观众按user_id；观测样本不代表完整观众覆盖。")
     source_frames: list[tuple[pd.DataFrame, list[str]]] = []
+    selected = getattr(state, "column_mapping", {}).get("metric_columns", [])
     if "live_daily_metrics" in tables:
-        source_frames.append((tables["live_daily_metrics"], ["buffering_rate", "crash_rate", "startup_latency", "watch_time", "interaction_rate"]))
+        source_frames.append((tables["live_daily_metrics"], selected or ["buffering_rate", "crash_rate", "startup_latency", "watch_time", "interaction_rate"]))
     else:
         if "live_quality_logs" in tables:
             source_frames.append((tables["live_quality_logs"], ["stutter_rate", "latency_ms"]))
@@ -252,6 +271,7 @@ def _live_package(state: Any, tables: dict[str, pd.DataFrame]) -> AnalysisResult
     comparisons: list[MetricComparisonResult] = []
     anomalies: list[AnomalyResult] = []
     for frame, candidates in source_frames:
+        cancellation_checkpoint()
         available = [metric for metric in candidates if metric in frame.columns]
         compared, detected = diagnose_metrics(frame, available)
         comparisons.extend(compared)
@@ -264,11 +284,27 @@ def _live_package(state: Any, tables: dict[str, pd.DataFrame]) -> AnalysisResult
     recommendations = build_recommendations(comparisons, [], contributions, evidence)
     quality = _quality_table(state, tables)
     result_tables = _tables_from_package(comparisons, anomalies, [], contributions, evidence, recommendations, quality)
+    association_text = ""
+    association_requested = any(term in state.user_question for term in ("关联", "相关", "关系")) or {"stutter_rate", "conversion_rate"}.issubset(selected)
+    if association_requested:
+        try:
+            association_tables = quality_conversion_association(tables.get("live_sessions", pd.DataFrame()))
+            result_tables.update(association_tables)
+            row = association_tables["quality_conversion_association"].iloc[0]
+            correlation = row["pearson_correlation"]
+            coefficient = f"{correlation:.4f}" if pd.notna(correlation) else "不可计算（变量无波动）"
+            association_text = f" 会话层级质量与转化的Pearson相关系数为 {coefficient}，有效配对 {int(row['sample_size'])} 个；属于描述性相关，不构成因果证据。"
+            evidence.append(AnalysisEvidence("LIVE-ASSOC-001", association_text.strip(), "stutter_rate / conversion_rate", str(row["method"]), "quality_conversion_association", {"pearson_correlation": correlation, "sample_size": int(row["sample_size"]), "statistical_unit": "session_id"}, "描述性", str(row["limitations"])))
+            recommendations.append(ActionRecommendation("中", "在设备与网络分组内复核质量和转化，并用随机实验验证改进效果。", "会话相关可能受用户组成及重复会话影响。", ("LIVE-ASSOC-001",), "分析维护方", "卡顿率与转化率", "在稳定质量条件下复核转化变化", "相关性不能说明质量变化导致转化变化。"))
+            result_tables["evidence"] = records_frame(evidence)
+            result_tables["recommendations"] = records_frame(recommendations)
+        except ValueError as exc:
+            state.caveats.append(str(exc))
     return AnalysisResultPackage(
         run_id=state.trace_id,
         scenario="live",
         question=state.user_question,
-        executive_summary=_executive_summary(comparisons, [], contributions),
+        executive_summary=_executive_summary(comparisons, [], contributions) + association_text,
         metric_comparisons=comparisons,
         anomalies=anomalies,
         dimension_contributions=contributions,
@@ -299,6 +335,27 @@ def _generic_package(state: Any, tables: dict[str, pd.DataFrame]) -> AnalysisRes
         confidence="中",
         caveat="需结合所选分析剧本和字段口径解释。",
     )]
+    # Attach bounded numeric evidence directly to existing computed tables.
+    # The first and last result rows cover aggregate/leading and latest-window findings.
+    numeric_evidence = []
+    for table_name, frame in result_tables.items():
+        cancellation_checkpoint()
+        if frame.empty:
+            continue
+        numeric_columns = list(frame.select_dtypes(include="number").columns)
+        if not numeric_columns:
+            continue
+        for position in list(dict.fromkeys([0, len(frame) - 1])):
+            row = frame.iloc[position]
+            supporting = {str(column): row[column].item() if hasattr(row[column], "item") else row[column] for column in numeric_columns[:12] if pd.notna(row[column])}
+            if not supporting:
+                continue
+            supporting["row_position"] = position
+            for group_key in ("row_key", "column_key"):
+                if group_key in row and pd.notna(row[group_key]):
+                    supporting[group_key] = str(row[group_key])
+            numeric_evidence.append(AnalysisEvidence(f"RESULT-{len(numeric_evidence) + 1:03d}", f"结果表 {table_name} 第 {position + 1} 行提供可复核的实际数值。", str(state.playbook_parameters.get("metric") or next(iter(state.column_mapping.get("metric_columns", [])), table_name)), "由实际结果表直接取值；窗口及分组以该行和当前剧本参数为准", table_name, supporting, "描述性", "证据值为计算结果摘要，不能替代业务口径与统计适用性检查。"))
+    evidence.extend(numeric_evidence[:30])
     recommendations = [ActionRecommendation(
         priority="低",
         action="复核结果表字段口径和当前筛选条件。",
@@ -332,14 +389,9 @@ def _experiment_artifact(state: Any, tables: dict[str, pd.DataFrame]) -> tuple[d
     mapping = getattr(state, "column_mapping", {})
     metric_columns = mapping.get("metric_columns", []) if isinstance(mapping, dict) else []
     metric_id = str(metric_columns[0]) if metric_columns else "completion_rate"
-    table_name = str(mapping.get("table_name") or "") if isinstance(mapping, dict) else ""
-    group_column = str(mapping.get("group_column") or "") if isinstance(mapping, dict) else ""
-    mapped = tables.get(table_name)
-    if isinstance(mapped, pd.DataFrame) and group_column and {group_column, metric_id}.issubset(mapped.columns):
-        return analyze_ab_test(mapped, group_column, metric_id, metric_type="mean"), metric_id
-    experiments = tables.get("experiments")
-    if isinstance(experiments, pd.DataFrame) and {"group", "completion_rate"}.issubset(experiments.columns):
-        return analyze_ab_test(experiments, "group", "completion_rate", metric_type="mean"), "completion_rate"
+    statistics = state.intermediate_results.get("result_tables", {}).get("experiment_statistics")
+    if isinstance(statistics, pd.DataFrame) and not statistics.empty:
+        return statistics.iloc[0].to_dict(), metric_id
     result = values.get("ab_test") or values.get("generic_ab_test")
     if isinstance(result, dict):
         return result, metric_id
@@ -347,10 +399,7 @@ def _experiment_artifact(state: Any, tables: dict[str, pd.DataFrame]) -> tuple[d
 
 
 def _experiment_package(state: Any, tables: dict[str, pd.DataFrame]) -> AnalysisResultPackage:
-    if "content_daily_metrics" in tables or "content_events" in tables:
-        package = _content_package(state, tables)
-    else:
-        package = _generic_package(state, tables)
+    package = _generic_package(state, tables)
     values, metric_id = _experiment_artifact(state, tables)
     if not values:
         package.executive_summary = "实验分析流程已执行，但当前结果未包含可展示的组间统计量。"
@@ -377,30 +426,33 @@ def _experiment_package(state: Any, tables: dict[str, pd.DataFrame]) -> Analysis
         treatment_sample_size=treatment_n,
         total_sample_size=control_n + treatment_n,
         absolute_lift=float(values.get("absolute_lift", 0.0) or 0.0),
-        relative_lift=float(values.get("relative_lift", 0.0) or 0.0),
+        relative_lift=float(values["relative_lift"]) if values.get("relative_lift") is not None else None,
         p_value=p_value,
         confidence_interval_lower=float(interval[0]),
         confidence_interval_upper=float(interval[1]),
-        confidence_level=0.95,
-        is_significant=p_value < 0.05 and min(control_n, treatment_n) >= 30,
+        confidence_level=float(values.get("confidence_level", 0.95)),
+        is_significant=p_value < 1 - float(values.get("confidence_level", 0.95)),
         significance_conclusion=conclusion,
-        method="Welch 两独立样本 t 检验" if values.get("metric_type") == "mean" else "两样本比例 z 检验",
+        method=str(values.get("method", "Welch 两独立样本 t 检验")),
+        statistical_unit=str(values.get("statistical_unit", "未确认")),
+        limitations=tuple(values.get("limitations", [])),
+        metric_type=str(values.get("metric_type", "mean")),
     )
-    interval_text = (
-        f"[{_format_experiment_value(metric_id, experiment.confidence_interval_lower)}, "
-        f"{_format_experiment_value(metric_id, experiment.confidence_interval_upper)}]"
-    )
+    def difference_text(value):
+        return f"{value * 100:.2f} 个百分点" if _is_rate_metric(metric_id) else f"{value:,.4g}"
+    interval_text = f"[{difference_text(experiment.confidence_interval_lower)}, {difference_text(experiment.confidence_interval_upper)}]"
+    relative_text = f"{experiment.relative_lift:.2%}" if experiment.relative_lift is not None else "不可计算（对照均值为零）"
     significance = "达到统计显著" if experiment.is_significant else "未达到统计显著"
     package.executive_summary = (
         f"{metric_name}实验结果：实验组 {_format_experiment_value(metric_id, experiment.treatment_value)}"
         f"（样本量 n={treatment_n:,}），对照组 {_format_experiment_value(metric_id, experiment.control_value)}"
-        f"（样本量 n={control_n:,}），绝对 lift {_format_experiment_value(metric_id, experiment.absolute_lift)}，"
-        f"相对 lift {experiment.relative_lift:.2%}；p-value={experiment.p_value:.6g}，"
-        f"95% 置信区间 {interval_text}，{significance}。"
+        f"（样本量 n={control_n:,}），绝对 lift {difference_text(experiment.absolute_lift)}，"
+        f"相对 lift {relative_text}；p-value={experiment.p_value:.6g}，"
+        f"{experiment.confidence_level:.0%} 绝对差置信区间 {interval_text}，{significance}。"
     )
     experiment_evidence = AnalysisEvidence(
         evidence_id="EXP-001",
-        claim=f"{metric_name}实验检验{significance}：p-value={experiment.p_value:.6g}，95% 置信区间 {interval_text}。",
+        claim=f"{metric_name}实验检验{significance}：p-value={experiment.p_value:.6g}，{experiment.confidence_level:.0%} 绝对差置信区间 {interval_text}。",
         metric=metric_id,
         method=experiment.method,
         result_table="experiment_comparison",
@@ -434,14 +486,49 @@ def _experiment_package(state: Any, tables: dict[str, pd.DataFrame]) -> Analysis
     package.result_tables["experiment_comparison"] = records_frame([experiment])
     package.result_tables["evidence"] = records_frame(package.evidence)
     package.result_tables["recommendations"] = records_frame(package.recommendations)
+    package.caveats.extend(experiment.limitations)
     package.metadata = {**package.metadata, "experiment_method": experiment.method}
     return package
 
 
+
+def _causal_result_summary(package: AnalysisResultPackage) -> str:
+    """Describe existing estimates only; no fitting or source-data scan here."""
+    frame = package.result_tables.get("adjusted_effect_summary")
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return package.executive_summary
+    values = frame.iloc[0]
+
+    def finite_value(name: str) -> float | None:
+        try:
+            value = float(values.get(name))
+        except (TypeError, ValueError):
+            return None
+        return value if math.isfinite(value) else None
+
+    naive, adjusted = finite_value("naive_difference"), finite_value("adjusted_effect")
+    sample_size = finite_value("sample_size")
+    if naive is None:
+        return package.executive_summary
+    parts = [f"轻量因果探索：两组原始均值差（处理组−对照组）={naive:.4f}"]
+    parts.append(f"回归调整估计={adjusted:.4f}" if adjusted is not None else "未生成回归调整估计，仅展示未经调整的差异")
+    if sample_size is not None and sample_size >= 0:
+        parts.append(f"有效样本量 n={sample_size:,.0f}")
+    return "；".join(parts) + "。估计值采用结果变量原量纲。此结果不是因果证明；随机化、无未观测混杂、重叠性和时序前提尚未验证。"
+
+
 def build_analysis_result_package(state: Any, tables: dict[str, pd.DataFrame]) -> AnalysisResultPackage:
     goal_mode = str(getattr(state, "goal_mode", ""))
-    if goal_mode == "experiment_analysis":
+    if getattr(state, "selected_playbook_id", None) == "experiment_comparison" or not getattr(state, "selected_playbook_id", None) and goal_mode == "experiment_analysis":
         package = _experiment_package(state, tables)
+    elif getattr(state, "selected_playbook_id", None):
+        package = _generic_package(state, tables)
+    elif goal_mode == "causal_exploration":
+        artifacts = state.intermediate_results.get("artifacts", {})
+        effect = artifacts.get("causal_light") or artifacts.get("generic_causal_light")
+        if effect:
+            state.intermediate_results["result_tables"] = {"adjusted_effect_summary": pd.DataFrame([{key: value for key, value in effect.items() if key != "caveats"}])}
+        package = _generic_package(state, tables)
     elif goal_mode == "content_performance" and ("content_daily_metrics" in tables or "content_events" in tables):
         package = _content_package(state, tables)
     elif goal_mode == "live_quality" and ("live_daily_metrics" in tables or "live_quality_logs" in tables):
@@ -453,6 +540,14 @@ def build_analysis_result_package(state: Any, tables: dict[str, pd.DataFrame]) -
     existing = state.intermediate_results.get("result_tables", {})
     if isinstance(existing, dict):
         package.result_tables = {**existing, **package.result_tables}
+    exploration = state.intermediate_results.get("playbook_result", {}).get("metadata", {}).get("exploration")
+    if exploration and getattr(state, "planning_status", "ready") == "ready":
+        package.metadata["exploration"] = exploration
+        if state.findings:
+            package.executive_summary = str(state.findings[0])
+    selected = getattr(state, "selected_playbook_id", None)
+    if selected == "causal_exploration" or not selected and goal_mode == "causal_exploration":
+        package.executive_summary = _causal_result_summary(package)
     return package
 
 

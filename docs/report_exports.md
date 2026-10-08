@@ -1,6 +1,6 @@
 # 中文报告导出
 
-v0.6 提供六类导出，顺序固定为 PDF、Markdown、离线 HTML、Excel、Manifest JSON 和 ZIP Bundle。Streamlit 默认在内存中生成；CLI 仅在明确请求时写入导出目录。
+当前整合版 提供六类导出，顺序固定为 PDF、Markdown、离线 HTML、Excel、Manifest JSON 和 ZIP Bundle。Streamlit 默认在内存中生成；CLI 仅在明确请求时写入导出目录。
 
 ## PDF
 
@@ -12,7 +12,7 @@ Markdown 和离线 HTML 都包含实际分析结果，而不只显示 AnalysisPl
 
 ## Excel
 
-Excel 使用 `BytesIO`、`pandas.ExcelWriter` 和 openpyxl。中文工作表包括执行摘要、指标对比、异常检测、漏斗拆解、维度贡献、证据链、建议清单、质量检查和运行清单，同时保留 v0.5 英文兼容别名。
+Excel 使用 `BytesIO`、`pandas.ExcelWriter` 和 openpyxl。中文工作表包括执行摘要、指标对比、异常检测、漏斗拆解、维度贡献、证据链、建议清单、质量检查和运行清单，仅在显式 compatibility_mode=True 时生成英文兼容别名。
 
 工作表名称会清洗并限制长度。单张结果表最多导出 100000 行，不默认加入原始上传表。
 

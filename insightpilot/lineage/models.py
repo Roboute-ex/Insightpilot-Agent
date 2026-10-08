@@ -83,9 +83,9 @@ class LineageGraph:
 
         lines = ["digraph lineage {"]
         for node in sorted(self.datasets, key=lambda item: item.node_id):
-            lines.append(f'  {safe(node.node_id)} [label="{node.name}", shape=box];')
+            lines.append(f'  {safe(node.node_id)} [label="{node.name.replace(chr(34), chr(39)).replace(chr(10), " ")}", shape=box];')
         for node in sorted(self.operations, key=lambda item: item.node_id):
-            lines.append(f'  {safe(node.node_id)} [label="{node.display_name}", shape=ellipse];')
+            lines.append(f'  {safe(node.node_id)} [label="{node.display_name.replace(chr(34), chr(39)).replace(chr(10), " ")}", shape=ellipse];')
         for edge in sorted(self.edges, key=lambda item: (item.source_id, item.target_id, item.relation)):
             lines.append(f'  {safe(edge.source_id)} -> {safe(edge.target_id)} [label="{edge.relation}"];')
         lines.append("}")
