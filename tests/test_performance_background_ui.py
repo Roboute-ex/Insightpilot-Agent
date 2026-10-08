@@ -8,6 +8,7 @@ import time
 import pandas as pd
 import pytest
 from streamlit.testing.v1 import AppTest
+from ui_session_support import session_snapshot
 from streamlit.runtime.scriptrunner import get_script_run_ctx
 from insightpilot.performance_tasks import TaskManager, report_stage
 
@@ -56,7 +57,7 @@ def settle(app, predicate, timeout=5):
 
 
 def loaded(app):
-    session = app.session_state.filtered_state.get("performance_dataset")
+    session = session_snapshot(app).get("performance_dataset")
     return session is not None and session.current is not None
 
 
@@ -127,16 +128,16 @@ def test_async_analysis_config_change_cancels_stale_result_and_retries(async_mod
         click(app,"开始分析")
         assert len(calls)==1
         app.text_input(key="question").set_value("订单量有何变化？").run()
-        assert app.session_state.filtered_state.get("last_analysis_result") is None
+        assert session_snapshot(app).get("last_analysis_result") is None
         assert async_mode.snapshot(app.session_state["_background_owner"]).status=="cancel_requested"
         click(app,"开始分析")
         assert any("本次新分析未提交" in str(x.value) for x in app.warning)
         click(app,"开始分析")
-        assert len(calls)==1 and "performance_background_pending" not in app.session_state.filtered_state
+        assert len(calls)==1 and "performance_background_pending" not in session_snapshot(app)
         gate.set(); settle(app,lambda:async_mode.stats()["tasks"]==0)
-        assert app.session_state.filtered_state.get("last_analysis_result") is None
+        assert session_snapshot(app).get("last_analysis_result") is None
         click(app,"开始分析")
-        settle(app,lambda:app.session_state.filtered_state.get("last_analysis_result") is not None)
+        settle(app,lambda:session_snapshot(app).get("last_analysis_result") is not None)
         assert len(calls)==2 and app.session_state["last_run_context"]["question"]=="订单量有何变化？"
         click(app,"开始分析")
         assert len(calls)==2 and app.session_state["performance_analysis_cache_hit"] is True
@@ -155,7 +156,7 @@ def test_release_requests_cancel_without_claiming_native_worker_stopped(async_mo
         click(app,"释放本会话数据与结果")
         assert async_mode.snapshot(owner).status=="cancel_requested"
         assert any("仍持有必要数据" in str(x.value) for x in app.info)
-        assert "performance_dataset" not in app.session_state.filtered_state
+        assert "performance_dataset" not in session_snapshot(app)
         gate.set(); settle(app,lambda:async_mode.stats()["tasks"]==0)
         assert app.session_state["performance_released"] is True
         assert not loaded(app)
@@ -176,9 +177,9 @@ def test_async_failure_is_visible_and_explicit_retry_runs_again(async_mode, monk
     app=start_app(); settle(app,lambda:loaded(app))
     click(app,"开始分析")
     settle(app,lambda:bool(app.error))
-    assert len(calls)==1 and app.session_state.filtered_state.get("last_analysis_result") is None
+    assert len(calls)==1 and session_snapshot(app).get("last_analysis_result") is None
     click(app,"开始分析")
-    settle(app,lambda:app.session_state.filtered_state.get("last_analysis_result") is not None)
+    settle(app,lambda:session_snapshot(app).get("last_analysis_result") is not None)
     assert len(calls)==2
 
 
@@ -202,7 +203,7 @@ def test_completed_old_analysis_is_not_adopted_after_configuration_change(async_
         assert async_mode.snapshot(owner).status=="completed"
         app.text_input(key="question").set_value("请分析订单变化")
         click(app,"开始分析")
-        settle(app,lambda:app.session_state.filtered_state.get("last_analysis_result") is not None)
+        settle(app,lambda:session_snapshot(app).get("last_analysis_result") is not None)
         assert len(calls)==2 and app.session_state["last_analysis_result"]["run_manifest"]["run_id"]=="async-2"
         assert app.session_state["last_run_context"]["question"]=="请分析订单变化"
     finally:
@@ -221,11 +222,11 @@ def test_upload_removal_cancels_metadata_task_and_releases_frozen_bytes(async_mo
         app.run()
         app.file_uploader[0].set_value(("test.csv",b"date,orders\n2026-01-01,1\n","text/csv")).run()
         assert entered.wait(1)
-        assert "performance_upload_inputs" in app.session_state.filtered_state
+        assert "performance_upload_inputs" in session_snapshot(app)
         app.file_uploader[0].set_value([]).run()
         assert not app.exception and not loaded(app)
         for key in ("performance_upload_inputs","performance_upload_files","performance_background_pending"):
-            assert key not in app.session_state.filtered_state
+            assert key not in session_snapshot(app)
         gate.set(); settle(app,lambda:async_mode.stats()["tasks"]==0)
         assert not loaded(app)
     finally:
@@ -257,7 +258,7 @@ def test_async_database_snapshot_expiry_requires_explicit_query(async_mode, monk
     app=_database_app()
     app.session_state["performance_dataset"]=DatasetSession(replace(PerformanceConfig(),session_ttl_seconds=5),clock=lambda:clock[0])
     click(app,"检查并加载只读查询"); settle(app,lambda:loaded(app))
-    assert len(calls)==1 and "performance_database_request" not in app.session_state.filtered_state
+    assert len(calls)==1 and "performance_database_request" not in session_snapshot(app)
     clock[0]=6
     app.run(); app.run()
     assert not loaded(app) and len(calls)==1
@@ -282,7 +283,7 @@ def test_expired_pending_database_task_does_not_automatically_requery(async_mode
         assert async_mode.snapshot(owner) is None
         app.run(); app.run()
         assert len(calls)==1 and not loaded(app)
-        assert "performance_background_pending" not in app.session_state.filtered_state
+        assert "performance_background_pending" not in session_snapshot(app)
         assert app.session_state["performance_background_blocked"].get("dataset")
         click(app,"检查并加载只读查询"); settle(app,lambda:loaded(app))
         assert len(calls)==2

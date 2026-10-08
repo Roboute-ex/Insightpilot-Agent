@@ -31,4 +31,4 @@ jobs:
       - name: Build distributions
         run: python -m build
       - name: Verify wheel and YAML without source imports
-        run: python scripts/check_distribution.py
+        run: python scripts/check_distribution.py --dependency-mode project

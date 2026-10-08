@@ -50,7 +50,12 @@ def custom_experiment(monkeypatch):
     app.multiselect(key="mapping_dimensions").set_value([])
     app.selectbox(key="mapping_group").set_value("arm").run()
     click(app, "确认当前字段映射")
-    app.text_input(key=PREFIX + "statistical_unit").set_value("user_id").run()
+    # This input belongs to the parameter form. A standalone rerun does not
+    # submit its draft value in the browser (or in current AppTest).
+    app.text_input(key=PREFIX + "statistical_unit").set_value("user_id")
+    click(app, "应用参数并更新建议")
+    assert app.session_state["guided_parameters"]["statistical_unit"] == "user_id"
+    assert counts["analysis"] == 0
     assert not app.exception
     return app, counts
 

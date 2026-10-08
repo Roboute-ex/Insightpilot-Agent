@@ -16,6 +16,7 @@ import pandas as pd
 import pytest
 from pypdf import PdfReader
 from streamlit.testing.v1 import AppTest
+from ui_session_support import session_snapshot
 from streamlit.testing.v1.errors import AppTestError
 
 from insightpilot.playbooks.registry import get_playbook_registry
@@ -98,7 +99,7 @@ def test_directory_is_top_level_complete_and_lazy_without_advanced(monkeypatch):
     counts = watch(monkeypatch)
     app = start()
     assert "查看全部分析方法" in [item.label for item in app.button]
-    assert not app.session_state.filtered_state.get("guided_advanced", False)
+    assert not session_snapshot(app).get("guided_advanced", False)
     assert not any(str(item.key).startswith("guided_choose_") for item in app.button)
     before = counts.copy()
     panel(app, "guided_all_methods")
@@ -111,7 +112,7 @@ def test_directory_is_top_level_complete_and_lazy_without_advanced(monkeypatch):
         assert item.description in body
         assert not app.button(key="guided_choose_" + item.playbook_id).disabled
     assert "轻量因果探索" in body and "处理" in body
-    assert not app.session_state.filtered_state.get("guided_advanced", False)
+    assert not session_snapshot(app).get("guided_advanced", False)
     panel(app, "guided_all_methods", False)
     assert not any(str(item.key).startswith("guided_choose_") for item in app.button)
     assert_no_work_since(counts, before)

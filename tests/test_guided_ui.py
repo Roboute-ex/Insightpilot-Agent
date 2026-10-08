@@ -4,6 +4,7 @@ from pathlib import Path
 import functools
 
 from streamlit.testing.v1 import AppTest
+from ui_session_support import session_snapshot
 
 APP = Path(__file__).resolve().parents[1] / "app/ui_streamlit.py"
 
@@ -101,7 +102,7 @@ def test_example_atomically_clears_causal_state_and_does_not_analyze(monkeypatch
     assert not app.exception
     assert app.session_state["playbook_selector"] == "auto"
     assert app.session_state["guided_selection_source"] == "example_applied"
-    assert not any(key.startswith("playbook_parameter_causal_exploration_") for key in app.session_state.filtered_state)
+    assert not any(key.startswith("playbook_parameter_causal_exploration_") for key in session_snapshot(app))
     assert any("已填入示例并恢复自动推荐" in str(x.value) for x in app.caption)
     assert counts["run_agent_analysis"] == counts["prepare_export_payload"] == 0
 

@@ -189,7 +189,7 @@ th,td{border:1px solid #d9e0e5;padding:6px;text-align:left}th{background:#f4f7f9
             f"<section><h2>分析质量检查</h2>{_definition({'检查状态': format_status(str(reviewer.get('status', 'WARN'))), '质量评分': reviewer.get('score', 'N/A')})}</section>",
             "<section><h2>质量维度与评分边界</h2><p>" + escape(QUALITY_NOTICE) + "</p>" + "".join(_definition(row) for row in quality) + "</section>",
             f"<section><h2>风险与限制</h2>{_items([translate_caveat(item) for item in result.get('caveats', [])])}</section>",
-            f"<section><h2>分析结果表</h2>{_table_sections(result_tables, result["_report_table_row_counts"])}</section>",
+            f"<section><h2>分析结果表</h2>{_table_sections(result_tables, result['_report_table_row_counts'])}</section>",
             f"<section><h2>交互式图表（Interactive Plotly Charts）</h2>{''.join(chart_fragments) or '<p>暂无可用图表。</p>'}</section>",
             f"<section><h2>数据来源摘要</h2>{_definition(_source_definition(source_summary))}</section>",
             f"<section><h2>分析问题</h2><p>{escape(str(result.get('question', '')))}</p></section>",

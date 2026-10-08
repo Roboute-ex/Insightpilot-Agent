@@ -5,6 +5,7 @@ from dataclasses import replace
 import pandas as pd
 import pytest
 from test_method_discovery_ui import start, press, watch, assert_no_work_since
+from ui_session_support import session_snapshot
 
 
 def navigate(app, value):
@@ -42,7 +43,7 @@ def test_navigation_and_form_draft_do_no_work(monkeypatch):
     press(app,"exploration_generate")
     assert_no_work_since(counts,before)
     assert any("明确确认" in str(x.value) for x in app.warning)
-    assert not app.session_state.filtered_state.get("performance_pending_branch")
+    assert not session_snapshot(app).get("performance_pending_branch")
 
 
 def test_explicit_pivot_runs_once_and_renders_real_result(monkeypatch):
@@ -55,7 +56,7 @@ def test_explicit_pivot_runs_once_and_renders_real_result(monkeypatch):
     assert counts["analysis"]-before["analysis"] == 1
     assert counts["export"] == 0
     result = app.session_state["last_analysis_result"]
-    assert result is not None, ([x.value for x in app.warning], [x.value for x in app.error], app.session_state.filtered_state.get("exploration_errors"))
+    assert result is not None, ([x.value for x in app.warning], [x.value for x in app.error], session_snapshot(app).get("exploration_errors"))
     assert result["execution_status"] == "COMPLETED", result.get("errors")
     totals = result["result_tables"]["exploration_totals"]
     assert totals.loc[totals["scope"].eq("all"),"metric_value"].item() == 30
@@ -74,7 +75,7 @@ def test_city_event_identity_and_explicit_child(monkeypatch):
     counts = watch(monkeypatch)
     app = start()
     press(app,"guided_run")
-    state = app.session_state.filtered_state
+    state = session_snapshot(app)
     session = state["performance_result"]
     data = state["performance_dataset"].current
     result = state["last_analysis_result"]
@@ -133,7 +134,7 @@ def test_distribution_chart_switch_reuses_statistics(monkeypatch):
     app.checkbox(key="exploration_confirmed").check()
     press(app,"exploration_generate")
     result = app.session_state["last_analysis_result"]
-    assert result is not None, ([x.value for x in app.warning], [x.value for x in app.error], app.session_state.filtered_state.get("exploration_errors"))
+    assert result is not None, ([x.value for x in app.warning], [x.value for x in app.error], session_snapshot(app).get("exploration_errors"))
     assert result["execution_status"] == "COMPLETED", result.get("errors")
     stats = result["result_tables"]["distribution_summary"].iloc[0]
     assert stats["mean"] == 30

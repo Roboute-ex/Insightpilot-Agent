@@ -26,6 +26,8 @@ def main() -> int:
     parser.add_argument("--wheel", type=Path, help="Exact newly built wheel; avoids selecting an older same-version artifact.")
     parser.add_argument("--work-dir", type=Path)
     parser.add_argument("--wheelhouse", type=Path, action="append", default=[])
+    parser.add_argument("--dependency-mode", choices=("locked", "project"), default="locked",
+        help="locked: restore local locked versions; project: resolve wheel dependencies for this Python/platform.")
     args = parser.parse_args()
     wheels = sorted((ROOT / "dist").glob("*.whl"))
     wheel = args.wheel.resolve() if args.wheel else (wheels[-1].resolve() if wheels else None)
@@ -54,7 +56,8 @@ def main() -> int:
         flags.extend(["--find-links", str(wheelhouse.resolve())])
     records = []
     result = {"wheel": str(wheel), "wheel_sha256": hashlib.sha256(wheel.read_bytes()).hexdigest(),
-        "required_files": required, "required_file_count": len(required), "python": str(python), "checks": records}
+        "required_files": required, "required_file_count": len(required), "python": str(python),
+        "dependency_mode": args.dependency_mode, "checks": records}
 
     def run(name, arguments):
         command = [str(python), "-X", "utf8", *arguments]
@@ -69,7 +72,7 @@ def main() -> int:
         return completed.returncode
 
     lock = ROOT / "requirements-lock.txt"
-    if lock.exists() and run("install_locked", ["-m", "pip", "install", "-r", str(lock), *flags]):
+    if args.dependency_mode == "locked" and lock.exists() and run("install_locked", ["-m", "pip", "install", "-r", str(lock), *flags]):
         return 1
     if run("install_wheel", ["-m", "pip", "install", str(wheel), *flags]):
         return 1

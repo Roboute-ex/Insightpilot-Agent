@@ -118,7 +118,13 @@ def _validate_scopes(tree, allowed_tables, table_columns):
         if scope.outer_columns:
             names = list(scope.outer_columns)
         elif isinstance(scope.expression, (exp.Union, exp.Intersect, exp.Except)):
-            names = outputs(scope.union_scopes[0])
+            # SQLGlot 30.21 renamed union_scopes; both interfaces retain left/right order.
+            branches = getattr(scope, "set_operation_scopes", None)
+            if branches is None:
+                branches = getattr(scope, "union_scopes", None)
+            if not isinstance(branches, (list, tuple)) or len(branches) != 2 or not all(isinstance(branch, Scope) for branch in branches):
+                _deny("UNRESOLVED_SET_BRANCH", "集合查询分支作用域未能完整解析，拒绝执行。")
+            names = outputs(branches[0])
         else:
             names = []
             for selected in scope.expression.selects:

@@ -12,6 +12,7 @@ import time
 import pandas as pd
 import pytest
 from streamlit.testing.v1 import AppTest
+from ui_session_support import session_snapshot
 from streamlit.testing.v1.errors import AppTestError
 
 from insightpilot.agents.dataset import PreparedDataset
@@ -82,7 +83,7 @@ def test_real_async_bad_method_never_submits_then_accept_and_start_runs_once(act
     app.session_state["guided_parameters"] = {"control_value": "control", "treatment_value": "treatment"}
     app.run()
     assert not app.exception
-    _settle(app, lambda: app.session_state.filtered_state.get("performance_dataset") is not None and app.session_state["performance_dataset"].current is not None and actual_manager.stats()["tasks"] == 0)
+    _settle(app, lambda: session_snapshot(app).get("performance_dataset") is not None and app.session_state["performance_dataset"].current is not None and actual_manager.stats()["tasks"] == 0)
     loading = dict(counts)
     assert loading["submit"] == 1
     counts.subtract(counts.copy())
@@ -121,7 +122,7 @@ def test_real_async_bad_method_never_submits_then_accept_and_start_runs_once(act
     assert not app.button(key="guided_run").disabled
     assert_no_execution("accepted_recommendation_only")
     app.button(key="guided_run").click().run()
-    _settle(app, lambda: isinstance(app.session_state.filtered_state.get("last_analysis_result"), dict) and actual_manager.stats()["tasks"] == 0)
+    _settle(app, lambda: isinstance(session_snapshot(app).get("last_analysis_result"), dict) and actual_manager.stats()["tasks"] == 0)
     actual = app.session_state["last_analysis_result"]
     assert actual["execution_status"] == "COMPLETED"
     assert counts["submit"] == counts["workflow"] == 1

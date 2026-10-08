@@ -7,6 +7,7 @@ import functools
 import pandas as pd
 import pytest
 from streamlit.testing.v1 import AppTest
+from ui_session_support import session_snapshot
 from app.session_data import AnalysisSession, DatasetSession, analysis_cache_key
 from insightpilot.performance import PerformanceConfig, MemoryBudgetExceeded
 
@@ -197,8 +198,8 @@ def test_refresh_and_release_do_not_silently_keep_or_reload_old_data(monkeypatch
     assert any('上次运行结果' in str(x.value) for x in app.warning)
     click(app,'释放本会话数据与结果')
     assert app.session_state['performance_released'] is True
-    assert 'performance_dataset' not in app.session_state.filtered_state
-    assert app.session_state.filtered_state.get('last_analysis_result') is None
+    assert 'performance_dataset' not in session_snapshot(app)
+    assert session_snapshot(app).get('last_analysis_result') is None
     app.run()
     assert counts['load_synthetic_tables']==2
 
@@ -289,7 +290,7 @@ def test_upload_raw_bytes_budget_rejects_and_releases_widget(monkeypatch):
     assert app.file_uploader[0].value in (None,[])
     assert app.session_state['performance_dataset'].current is None
     assert app.session_state['uploaded_widget_epoch']==1
-    assert 'performance_upload_files' not in app.session_state.filtered_state
+    assert 'performance_upload_files' not in session_snapshot(app)
 
 
 def test_parsed_tables_and_retained_source_share_dataset_budget():

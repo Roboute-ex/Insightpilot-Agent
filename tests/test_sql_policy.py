@@ -197,3 +197,48 @@ def test_bad_sql_no_connection_no_new_database(tmp_path, monkeypatch):
 @pytest.mark.parametrize("parameters", ["user SQL", [object()], {1: "x"}, [[1,2]]])
 def test_only_bound_scalars(parameters):
     with pytest.raises(ValueError): policy.validate_bound_parameters(parameters)
+
+@pytest.mark.parametrize("dialect", ["duckdb", "sqlite"])
+@pytest.mark.parametrize("operation", ["UNION ALL", "INTERSECT", "EXCEPT"])
+def test_set_operation_output_aliases_and_all_branch_authorization(dialect, operation):
+    query = f"SELECT x AS result FROM t {operation} SELECT x AS other FROM u ORDER BY result"
+    accepted = check(query, dialect)
+    assert accepted.allowed, accepted.to_dict()
+    assert accepted.referenced_tables == ("t", "u")
+    assert accepted.referenced_columns == ("t.x", "u.x")
+    bounded = policy.bounded_read_query(query, 10, dialect=dialect, allowed_tables=set(SCHEMA), table_columns=SCHEMA)
+    assert check(bounded, dialect).allowed
+    assert check(query.replace("ORDER BY result", "ORDER BY other"), dialect).rejection_code == "COLUMN_NOT_ALLOWED"
+    for unauthorized in (
+        query.replace("FROM t", "FROM forbidden"),
+        query.replace("FROM u", "FROM forbidden"),
+        query.replace("SELECT x AS other", "SELECT missing AS other"),
+    ):
+        rejected = check(unauthorized, dialect)
+        assert not rejected.allowed
+        assert rejected.rejection_code in {"TABLE_NOT_ALLOWED", "COLUMN_NOT_ALLOWED"}, rejected.to_dict()
+
+
+@pytest.mark.parametrize("dialect", ["duckdb", "sqlite"])
+def test_nested_set_operations_keep_output_scope_and_reject_hidden_unauthorized_branch(dialect):
+    query = "WITH combined AS (SELECT x AS result FROM t UNION ALL SELECT x FROM u) SELECT result FROM combined EXCEPT SELECT x FROM t ORDER BY result"
+    assert check(query, dialect).allowed
+    rejected = check(query.replace("SELECT x FROM u", "SELECT x FROM forbidden"), dialect)
+    assert rejected.rejection_code == "TABLE_NOT_ALLOWED"
+    assert check(query.replace("ORDER BY result", "ORDER BY missing"), dialect).rejection_code == "COLUMN_NOT_ALLOWED"
+
+
+def test_unknown_set_operation_scope_interface_fails_closed(monkeypatch):
+    traverse = policy.traverse_scope
+    def missing_branches(tree):
+        scopes = traverse(tree)
+        for scope in scopes:
+            if isinstance(scope.expression, (policy.exp.Union, policy.exp.Intersect, policy.exp.Except)):
+                for name in ("union_scopes", "set_operation_scopes"):
+                    if hasattr(scope, name):
+                        delattr(scope, name)
+        return scopes
+    monkeypatch.setattr(policy, "traverse_scope", missing_branches)
+    rejected = check("SELECT x FROM t UNION ALL SELECT x FROM u ORDER BY x")
+    assert not rejected.allowed
+    assert rejected.rejection_code == "UNRESOLVED_SET_BRANCH"
