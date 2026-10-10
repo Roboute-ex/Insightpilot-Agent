@@ -60,7 +60,7 @@ def _field_overview(meta):
         rows.append({"字段": column, "类型": fact.get("dtype", "未确认"), "有效非空": valid,
             "缺失": total-valid if isinstance(total, int) and isinstance(valid, int) else None,
             "不同值数量": fact.get("unique_count"), "日期起": fact.get("date_min"), "日期止": fact.get("date_max")})
-    st.caption("以下为本数据修订加载时的实际元数据；空白表示未确认。打开此页不重新扫描原始数据。")
+    st.caption("空白表示未确认。")
     page = st.number_input("字段页", min_value=1, max_value=max(1, math.ceil(len(rows)/50)), key="exploration_field_page")
     st.dataframe(pd.DataFrame(rows[(page-1)*50:page*50]), hide_index=True, width="stretch")
 
@@ -79,23 +79,22 @@ def _typed_filter(value, fact):
 
 
 def _render_result(session):
-    node = next((n for n in session.history.nodes if n.node_id == session.history.active_node_id), None)
+    from app.components.data_source_panel import current_dataset
+    from app.components.analysis_context import project_run_context, render_analysis_context
+    snapshot = current_dataset()
+    node = render_analysis_context(session, snapshot)
+    if node is None:
+        return
+    context = project_run_context(session.history, node.node_id, snapshot)
+    if context["data_matches"] is not True or context["source_available"] is not True:
+        return
     result = session.current
-    if node is not None and not session.history.result_available(node, result):
+    if not session.history.result_available(node, result):
         st.info("选定历史结果已释放，需要重新执行；当前探索草稿没有改变该历史结果。")
         return
     if not isinstance(result, dict) or result.get("execution_status") != "COMPLETED":
         return
-    exploration = (result.get("result_package") or result.get("analysis_result_package") or {}).get("metadata", {}).get("exploration")
-    exploration = exploration or (result.get("playbook_result") or {}).get("metadata", {}).get("exploration")
-    if not exploration:
-        # Package key is the established workflow 'analysis_package'.
-        exploration = (result.get("analysis_package") or {}).get("metadata", {}).get("exploration")
-    if not exploration:
-        st.caption("当前保留的是其它分析结果；请在分析工作台查看。探索草稿尚未执行。")
-        return
-    st.subheader("已生成探索结果", anchor=False)
-    st.caption("运行 " + str(result.get("run_manifest", {}).get("run_id", "")) + "；下方仅显示该运行的冻结口径，未提交的新配置不参与结果或报告。")
+    st.caption("未提交的配置不会改变此结果或报告。")
     from app.components.result_panel import render_result_panel
     render_result_panel(result, view_mode="demo")
 
@@ -127,7 +126,7 @@ def render_exploration_panel(snapshot, analysis_session):
     aggregation = "sum"
     if section != "distribution":
         aggregation = st.selectbox("指标聚合口径", list(AGGREGATIONS), format_func=AGGREGATIONS.get, key="exploration_aggregation")
-    st.caption("筛选、时间范围、指标和维度只形成草稿。明确点击生成才进行全量计算；图型与标签切换只改展示。")
+    st.caption("配置尚未提交；点击生成后才执行。")
     base_filters = st.session_state.get("exploration_base_filters") or []
     if base_filters:
         st.caption("恢复运行的原筛选：" + str(base_filters))
@@ -203,5 +202,4 @@ def render_exploration_panel(snapshot, analysis_session):
             stage_exploration(snapshot, config)
     for message in st.session_state.get("exploration_errors", []):
         st.warning(str(message))
-    st.caption("均值按有效观测行计算；比率按总分子/总分母；去重合计在对应范围重新去重。缺失与未观测组合不补成0。")
     _render_result(analysis_session)

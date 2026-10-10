@@ -12,16 +12,20 @@ import streamlit as st
 
 from insightpilot.analysis.threads import compare_runs, validate_history_json
 from insightpilot.ui.theme import render_compact_summary_card
+from insightpilot.reports.manifest import _safe_string
 
 
 def apply_pending_branch() -> None:
     draft = st.session_state.pop("performance_pending_branch", None)
     if not draft:
         return
-    from app.background_tasks import background_enabled, cancel_current
-    if background_enabled():
+    from app.background_tasks import background_enabled, cancel_current, task_snapshot
+    if background_enabled() and (st.session_state.get("performance_background_pending") or task_snapshot() is not None):
         cancel_current(block=False)
-    config = draft["config"]
+    config = deepcopy(draft["config"])
+    # A frozen configuration is not an authorization to execute or reuse answers.
+    for key in ("approved_plan_id", "execution_mode", "clarification_answers", "request_fingerprint"):
+        config.pop(key, None)
     st.session_state["workbench_page"] = "explore" if (config.get("parameters") or {}).get("exploration_request") else "workbench"
     st.session_state["question"] = str(config.get("question", ""))
     st.session_state["goal_mode_selector"] = config.get("goal_mode", "auto")
@@ -38,6 +42,15 @@ def apply_pending_branch() -> None:
     st.session_state["performance_branch_mapping"] = deepcopy(config.get("column_mapping"))
     st.session_state.pop("example_settings", None)
     st.session_state.pop("performance_clarification_state", None)
+    st.session_state.pop("performance_mapping_confirmation", None)
+    st.session_state.pop("guided_last_preflight", None)
+    st.session_state.pop("guided_advice", None)
+    st.session_state.pop("performance_restored_run_id", None)
+    if draft.get("restore_run_id"):
+        st.session_state["performance_restored_run_id"] = draft["restore_run_id"]
+    if draft.get("data_changed") and st.session_state.get("guided_mapping"):
+        st.session_state["guided_mapping"]["source"] = "automatic_suggestion"
+        st.session_state["performance_branch_mapping"] = deepcopy(st.session_state["guided_mapping"])
     # Restore only registered form controls; imported JSON is never sent here.
     mapping = config.get("column_mapping") or {}
     for field, key in {"table_name": "mapping_table", "date_column": "mapping_date", "metric_columns": "mapping_metrics",
@@ -90,8 +103,76 @@ def apply_pending_branch() -> None:
 
 
 def _stage(node, config):
-    st.session_state["performance_pending_branch"] = {"parent_run_id": node.run_id, "config": config}
+    session = st.session_state.get("performance_result")
+    request_restore(session, node.node_id, config=config)
     st.rerun()
+
+
+def request_restore(session, node_id, *, config=None):
+    """Queue a bounded restore intention, not widget writes or execution."""
+    node = session.history.get(node_id)
+    st.session_state["performance_restore_intent"] = {"node_id": node.node_id, "config": config}
+    st.session_state.pop("core_restore_current_data", None)
+
+
+def _restore_source_tables(node, config):
+    from app.components.analysis_context import run_source_tables
+    return run_source_tables(node, config)
+
+
+def _confirm_restore(session, snapshot):
+    intent = st.session_state.get("performance_restore_intent") or {}
+    try:
+        node = session.history.get(intent.get("node_id"))
+    except ValueError:
+        st.session_state.pop("performance_restore_intent", None)
+        return
+    if snapshot is None:
+        return
+    changed = (node.context.get("dataset_id"), str(node.dataset_revision)) != (snapshot.dataset_id, str(snapshot.revision))
+    if changed and not st.session_state.get("core_restore_current_data", False):
+        return
+    config = deepcopy(intent.get("config") if intent.get("config") is not None else node.config)
+    # Restoring a missing table must not silently select the first available table.
+    tables = _restore_source_tables(node, config)
+    if not tables or any(table not in snapshot.metadata for table in tables):
+        return
+    st.session_state["performance_pending_branch"] = {"parent_run_id": node.run_id, "config": config,
+        "restore_run_id": node.run_id, "data_changed": changed}
+    st.session_state.pop("performance_restore_intent", None)
+
+
+def _cancel_restore():
+    st.session_state.pop("performance_restore_intent", None)
+
+
+def render_restore_prompt(session, snapshot):
+    intent = st.session_state.get("performance_restore_intent")
+    if not intent:
+        return
+    try:
+        node = session.history.get(intent["node_id"])
+    except ValueError:
+        st.warning("准备恢复的历史节点已清理，请重新选择仍保留的运行。")
+        st.session_state.pop("performance_restore_intent", None)
+        return
+    with st.container(border=True, key="core_restore_prompt"):
+        st.warning("恢复将覆盖当前问题、方法、字段映射和参数草稿。表单内尚未提交的编辑无法由服务器读取；若要保留，请取消本次恢复。恢复本身不会执行分析。")
+        st.caption("恢复的问题：" + _safe_string(str(node.config.get("question", "未记录"))))
+        missing = snapshot is None
+        tables = _restore_source_tables(node, intent.get("config") if intent.get("config") is not None else node.config)
+        if snapshot is None or not tables or any(table not in snapshot.metadata for table in tables):
+            missing = True
+            st.error("该配置所需源表当前不可用或未被记录，请先重新加载对应数据并核对分析范围。运行清单不能恢复原始数据。")
+        changed = snapshot is not None and (node.context.get("dataset_id"), str(node.dataset_revision)) != (snapshot.dataset_id, str(snapshot.revision))
+        confirmed = not changed
+        if changed:
+            st.warning("当前数据版本已变化。旧口径确认、字段确认和审批不会沿用，应用后必须重新预检。")
+            confirmed = st.checkbox("明确将该配置应用到当前数据并重新检查", key="core_restore_current_data")
+        with st.container(horizontal=True):
+            st.button("确认恢复配置", key="core_restore_confirm", disabled=missing or not confirmed,
+                on_click=_confirm_restore, args=(session, snapshot))
+            st.button("保留当前草稿", key="core_restore_cancel", on_click=_cancel_restore)
 
 
 def _branch_config(node, snapshot):
@@ -110,15 +191,14 @@ def _branch_config(node, snapshot):
     return config
 
 
-def _activate_history_run(session, node_id):
+def _activate_history_run(session, node_id, *, page=None):
     if node_id is None:
         return
-    from app.background_tasks import background_enabled, cancel_current
-    pending = st.session_state.get("performance_background_pending")
-    if background_enabled() and pending and pending["kind"] == "analysis":
-        cancel_current(block=False)
-    session.history.select(node_id)
+    session.history.select(node_id, cancel_request=False)
+    st.session_state["performance_view_epoch"] = int(st.session_state.get("performance_view_epoch", 0)) + 1
     st.session_state["history_run_selector"] = node_id
+    if page:
+        st.session_state["workbench_page"] = page
 
 
 def _select_history_run(session):
@@ -136,12 +216,7 @@ def render_history_controls(session, snapshot, view_mode: str) -> str | None:
     selected = st.selectbox("查看历史运行", list(labels), format_func=labels.get, key="history_run_selector",
                             on_change=_select_history_run, args=(session,))
     if selected != history.active_node_id:
-        from app.background_tasks import background_enabled, cancel_current
-        if background_enabled():
-            pending = st.session_state.get("performance_background_pending")
-            if pending and pending["kind"] == "analysis":
-                cancel_current(block=False)
-        history.select(selected)
+        _activate_history_run(session, selected)
     node = history.get(selected)
     available = history.result_available(node, session.current)
     st.caption(f"当前选定运行 {node.run_id}；历史仅保留配置、有限聚合摘要及受控结果引用。最多10条，不增加结果总预算。")

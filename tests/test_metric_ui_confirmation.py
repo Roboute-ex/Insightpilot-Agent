@@ -113,6 +113,8 @@ def test_confirmed_history_restores_direction_only_within_its_original_context(m
     assert app.selectbox(key=PREFIX + "control_value").value is None
     app.segmented_control(key="workbench_page").set_value("history").run()
     click(app, "恢复此运行配置")
+    assert counts["analysis"] == 1
+    click(app, "确认恢复配置")
     assert app.selectbox(key="mapping_group").value == "arm"
     assert app.selectbox(key=PREFIX + "control_value").value == "control"
     assert app.selectbox(key=PREFIX + "treatment_value").value == "treatment"
@@ -152,6 +154,8 @@ def test_auto_experiment_history_restores_only_confirmed_same_context_directions
     assert app.selectbox(key=PREFIX + "treatment_value").value is None
     app.segmented_control(key="workbench_page").set_value("history").run()
     click(app, "恢复此运行配置")
+    assert counts["analysis"] == 1
+    click(app, "确认恢复配置")
     assert app.selectbox(key="playbook_selector").value == "auto"
     assert app.selectbox(key="mapping_group").value == "arm"
     assert app.selectbox(key=PREFIX + "control_value").value == "control"

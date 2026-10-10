@@ -34,7 +34,8 @@ def test_workbench_shows_metadata_configuration_and_six_real_shortcuts():
     assert "已识别日期范围" in body(app)
     assert {str(x.key).removeprefix("common_choose_") for x in app.button if str(x.key).startswith("common_choose_")} == {
         "data_profile", "metric_trend", "period_comparison", "dimension_contribution", "experiment_comparison", "causal_exploration"}
-    assert app.button(key="workbench_all_methods")
+    assert "分析方法" in app.segmented_control(key="workbench_page").options
+    assert not any(item.key in {"workbench_all_methods", "workbench_edit_config"} for item in app.button)
     assert not app.button(key="guided_run").disabled
     assert not app.json and not app.get("plotly_chart")
     assert not app.session_state["performance_result"].history.nodes
@@ -42,7 +43,7 @@ def test_workbench_shows_metadata_configuration_and_six_real_shortcuts():
 
 def test_method_library_filters_are_explicit_clearable_and_do_not_delete_unavailable_methods():
     app = start()
-    app.button(key="workbench_all_methods").click().run()
+    navigate(app, "methods")
     assert app.session_state["workbench_page"] == "methods"
     count = len(get_playbook_registry().list_all())
     assert len([x for x in app.button if str(x.key).startswith("guided_choose_")]) == count
@@ -60,6 +61,39 @@ def test_method_library_filters_are_explicit_clearable_and_do_not_delete_unavail
     assert app.selectbox(key="mapping_outcome").value == "orders"
     assert app.session_state["guided_selection_source"] == "user_selected"
     assert app.button(key="guided_run").disabled
+
+
+def test_examples_and_configuration_stay_with_inputs_and_open_without_work(monkeypatch):
+    from test_method_discovery_ui import watch, assert_no_work_since
+    counts = watch(monkeypatch)
+    app = start()
+    question = next(item for item in app.main if getattr(item, "key", None) == "workbench_question_column")
+    config = next(item for item in app.main if getattr(item, "key", None) == "workbench_config_column")
+    question_keys = [getattr(item, "key", None) for item in question]
+    assert question_keys.index("question") < question_keys.index("guided_more_examples")
+    assert "guided_advanced" not in question_keys
+    assert "guided_run" not in question_keys
+    assert "guided_advanced" in [getattr(item, "key", None) for item in config]
+    main_keys = [getattr(item, "key", None) for item in app.main]
+    assert main_keys.index("guided_advanced") < main_keys.index("guided_run")
+    assert "guided_plan" not in [getattr(item, "key", None) for item in app.main]
+    before = counts.copy()
+    app.session_state["guided_more_examples"] = True
+    app.run()
+    assert app.button(key="guided_apply_example")
+    app.session_state["guided_advanced"] = True
+    app.run()
+    assert not app.exception
+    advanced = next(item for item in app.expander if item.key == "guided_advanced")
+    assert "guided_plan" in [getattr(item, "key", None) for item in advanced]
+    assert not any(item.key == "guided_preview" for item in app.button)
+    app.session_state["guided_plan"] = True
+    app.run()
+    assert not app.exception
+    assert app.button(key="guided_preview")
+    assert_no_work_since(counts, before)
+    assert app.session_state["last_analysis_result"] is None
+    assert not app.session_state["performance_result"].history.nodes
 
 
 def test_presentation_navigation_keeps_draft_without_loading_hashing_or_execution(monkeypatch, caplog):

@@ -98,7 +98,8 @@ def record(name, payload):
 def test_directory_is_top_level_complete_and_lazy_without_advanced(monkeypatch):
     counts = watch(monkeypatch)
     app = start()
-    assert "查看全部分析方法" in [item.label for item in app.button]
+    assert "分析方法" in app.segmented_control(key="workbench_page").options
+    assert "查看全部分析方法" not in [item.label for item in app.button]
     assert not session_snapshot(app).get("guided_advanced", False)
     assert not any(str(item.key).startswith("guided_choose_") for item in app.button)
     before = counts.copy()
@@ -148,7 +149,7 @@ def test_every_method_configuration_button_selects_stable_id_without_work(monkey
         assert app.session_state["goal_mode_selector"] == original_goal
         assert_no_work_since(counts, before)
         panel(app, "guided_advanced", False)
-        assert "查看全部分析方法" in [item.label for item in app.button]
+        assert "分析方法" in app.segmented_control(key="workbench_page").options
         panel(app, "guided_all_methods")
         assert app.button(key="guided_choose_" + identifier)
     assert not app.session_state["performance_result"].history.nodes

@@ -14,6 +14,8 @@ def _key(value):
 def city_candidates(result, node, snapshot):
     if node.run_id != str(result.get("run_manifest", {}).get("run_id")) or str(node.dataset_revision) != str(snapshot.revision):
         return []
+    if node.context.get("dataset_id") != snapshot.dataset_id:
+        return []
     if result.get("execution_status") != "COMPLETED":
         return []
     table_key = "dimension_contributions"

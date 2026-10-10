@@ -51,7 +51,8 @@ def render_example_question_selector(scenario: str, view_mode: str = "demo", sna
         with st.container(horizontal=True):
             for q in usable:
                 st.button(q.question_zh, key="guided_example_"+q.question_id, on_click=_fill_question, args=(q,))
-    panel = st.expander("更多示例", expanded=bool(st.session_state.get("guided_more_examples", False)), key="guided_more_examples", on_change="rerun")
+    panel = st.popover("更多示例", type="tertiary", key="guided_more_examples", on_change="rerun",
+        help="按当前场景选择示例；填入后仍需明确点击开始分析。")
     selected = None
     if panel.open:
         with panel:

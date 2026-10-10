@@ -189,16 +189,14 @@ def render_plan_review(review: dict[str, Any]) -> None:
 
 
 def render_caveats(caveats: list[Any], view_mode: str) -> None:
-    st.subheader(t("section.risks_and_limitations"), anchor=False)
     values = caveats if isinstance(caveats, list) else []
     if not values:
-        st.caption("当前没有额外风险提示，仍需遵守模拟数据与不确定性边界。")
         return
+    st.subheader(t("section.risks_and_limitations"), anchor=False)
     errors = [item for item in values if isinstance(item, dict) and item.get("severity") == "error"]
     for item in errors:
         st.error(translate_caveat(item), icon=":material/error:")
     non_errors = [item for item in values if item not in errors]
-    st.caption(f"当前分析包含 {len(values)} 项风险与限制。")
     if not non_errors:
         return
     with st.expander("查看风险与限制", expanded=False, icon=":material/info:"):

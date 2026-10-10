@@ -37,6 +37,16 @@ def counted(monkeypatch, module, name, counter, label=None):
         return original(*args, **kwargs)
     monkeypatch.setattr(module, name, wrapper)
 
+def assert_old_result_unavailable(app):
+    assert any('当前数据' in str(item.value) and '不一致' in str(item.value) for item in app.warning)
+    assert any('历史摘要' in str(item.value) and '数据引用已失效' in str(item.value) for item in app.info)
+    session = app.session_state['performance_result']
+    node = session.history.get(session.history.active_node_id)
+    assert node.dataset_revision != app.session_state['performance_dataset'].current.revision
+    assert not session.history.result_available(node, session.current)
+    assert not any(item.key == 'result_tabs' for item in app.segmented_control)
+    assert not any(str(item.key).startswith('generate_export_') for item in app.button)
+
 def test_display_reruns_do_not_reload_profile_hash_or_analyze(monkeypatch):
     import app.components.data_source_panel as source
     import insightpilot.agents.dataset as dataset
@@ -106,7 +116,7 @@ def test_csv_upload_is_once_per_identity_and_parsing_configuration(monkeypatch):
     app.file_uploader[0].set_value(('same.csv',changed,'text/csv')).run()
     assert counts['read_csv_file']==2
     assert app.session_state['performance_dataset'].current.revision!=original.revision
-    assert any('上次运行结果' in str(x.value) for x in app.warning)
+    assert_old_result_unavailable(app)
     app.selectbox(key='upload_encoding_0').set_value('utf-8').run()
     assert counts['read_csv_file']==3
     app.selectbox(key='upload_separator_0').set_value('分号').run()
@@ -195,7 +205,7 @@ def test_refresh_and_release_do_not_silently_keep_or_reload_old_data(monkeypatch
     click(app,'加载 / 刷新当前数据')
     assert counts['load_synthetic_tables']==2
     assert app.session_state['performance_dataset'].current.revision!=revision
-    assert any('上次运行结果' in str(x.value) for x in app.warning)
+    assert_old_result_unavailable(app)
     click(app,'释放本会话数据与结果')
     assert app.session_state['performance_released'] is True
     assert 'performance_dataset' not in session_snapshot(app)

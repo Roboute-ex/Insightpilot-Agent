@@ -181,6 +181,7 @@ def comparison_context(result: dict[str, Any], config: dict[str, Any], dataset_i
         "timezone": mapping.get("timezone", "未确认"),
         "time_grain": exploration.get("time_grain") if exploration else request.get("time_grain") or params.get("time_grain", mapping.get("time_grain", "day")),
         "window": {"periods": periods,
+            "target_dates": sorted({str(x["date"]) for x in package.get("anomalies", []) if x.get("date")}),
             **({"exploration": {k: exploration.get(k) for k in ("date_from", "date_to")}} if exploration else {}),
             "parameters": {k: params.get(k) for k in ("current_start", "current_end", "previous_start", "previous_end", "date_range", "target_date", "date_from", "date_to") if params.get(k) is not None},
             "semantic": {k: request.get(k) for k in ("date_from", "date_to") if request.get(k) is not None},
@@ -212,10 +213,15 @@ class AnalysisThread:
     def size_bytes(self) -> int:
         return sum(n.estimated_bytes for n in self.nodes)
 
-    def bind_dataset(self, dataset_id: str, revision: str) -> None:
+    def bind_dataset(self, dataset_id: str, revision: str, *, preserve_history: bool = False) -> None:
         identity = (dataset_id, str(revision))
         if self.dataset_identity is not None and identity != self.dataset_identity:
-            self.clear()
+            if preserve_history:
+                # Keep only the already-budgeted immutable summaries. Neither a
+                # result reference nor an execution approval transfers to new data.
+                self.request_node_id = self.parent_run_id = None
+            else:
+                self.clear()
         self.dataset_identity = identity
 
     def clear(self) -> None:
@@ -226,14 +232,15 @@ class AnalysisThread:
 
     def get(self, node_id: str) -> RunNode:
         node = next((n for n in self.nodes if n.node_id == node_id), None)
-        if node is None:
+        if node is None or node.thread_id != self.thread_id:
             raise ValueError("此历史节点不属于当前会话或已过期。")
         return node
 
-    def select(self, node_id: str) -> RunNode:
+    def select(self, node_id: str, *, cancel_request: bool = True) -> RunNode:
         node = self.get(node_id)
         self.active_node_id = node.node_id
-        self.request_node_id = None
+        if cancel_request:
+            self.request_node_id = None
         return node
 
     def begin_request(self, parent_run_id: str | None = None) -> str:
@@ -244,18 +251,21 @@ class AnalysisThread:
         return self.request_node_id
 
     def add(self, result: dict[str, Any], config: dict[str, Any], *, dataset_id: str,
-            revision: str, schema: dict[str, Any], node_id: str | None = None) -> RunNode:
+            revision: str, schema: dict[str, Any], node_id: str | None = None,
+            activate: bool = True) -> RunNode:
+        if node_id is not None and (node_id != self.request_node_id or
+                self.dataset_identity is not None and self.dataset_identity != (dataset_id, str(revision))):
+            raise ValueError("旧任务与当前分支或数据不一致，未采纳历史结果。")
         self.bind_dataset(dataset_id, revision)
         run_id = str((result.get("run_manifest") or {}).get("run_id") or "")
         if not run_id:
             raise ValueError("历史需要真实运行编号。")
         existing = next((n for n in self.nodes if n.run_id == run_id), None)
         if existing:
-            self.active_node_id = existing.node_id
+            if activate:
+                self.active_node_id = existing.node_id
             self.request_node_id = None
             return existing
-        if node_id is not None and node_id != self.request_node_id:
-            raise ValueError("旧任务与当前分支不一致，未采纳历史结果。")
         definitions = result.get("metric_definitions") or []
         context = comparison_context(result, config, dataset_id, revision, schema)
         node = RunNode(self.thread_id, node_id or str(uuid4()), self.parent_run_id, run_id,
@@ -268,12 +278,15 @@ class AnalysisThread:
         while self.nodes and (len(self.nodes) >= self.max_nodes or self.size_bytes + node.estimated_bytes > self.max_bytes):
             self.nodes.pop(0)
         self.nodes.append(node)
-        self.active_node_id = node.node_id
+        if activate:
+            self.active_node_id = node.node_id
         self.request_node_id = None
         return node
 
     def result_available(self, node: RunNode, result: dict[str, Any] | None) -> bool:
         if node.thread_id != self.thread_id or node not in self.nodes:
+            return False
+        if self.dataset_identity != (node.context.get("dataset_id"), str(node.dataset_revision)):
             return False
         return bool(result and str((result.get("run_manifest") or {}).get("run_id")) == node.result_ref)
 

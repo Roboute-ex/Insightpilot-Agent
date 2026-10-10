@@ -31,7 +31,7 @@ def render_drilldown_panel(result, snapshot, analysis_session):
             selection = None
     else:
         st.session_state.pop("workbench_drilldown_draft", None)
-    if st.button("基于选中分组继续分析", disabled=selection is None, key="workbench_drilldown_submit"):
+    if st.button("查看该城市当日表现", disabled=selection is None, key="workbench_drilldown_submit"):
         from app.components.exploration_panel import stage_exploration
         try:
             config = build_drilldown_config(selection, result, node, snapshot)

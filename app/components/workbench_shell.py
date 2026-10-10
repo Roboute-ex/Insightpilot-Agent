@@ -78,5 +78,3 @@ def render_config_summary(prepared, config):
         "基准：" + str(parameters.get("comparison_type") or "由当前方法与已执行范围确定"),
         "映射：" + ("用户已确认" if mapping.get("source") == "user_selected" else "建议或内置映射，结合预检复核")]
     render_compact_summary_card("本次分析配置 · 草稿", details)
-    st.button("编辑分析配置", on_click=open_configuration, key="workbench_edit_config")
-    st.caption("修改草稿不会改变已执行结果；开始分析前重新检查口径、适配性和安全边界。")

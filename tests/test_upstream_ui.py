@@ -66,7 +66,9 @@ def test_branch_back_key_comparison_and_selected_run_export(monkeypatch):
     app.selectbox(key='history_dimension').set_value('city').run()
     click(app,'修改维度重新分析')
     assert counts['run_agent_analysis']==1
-    click(app,'开始分析'); city=history.nodes[-1]
+    click(app,'确认恢复配置')
+    assert counts['run_agent_analysis']==1
+    click(app,'重新运行该分析'); city=history.nodes[-1]
     assert city.parent_run_id==parent.run_id
     app.segmented_control(key='workbench_page').set_value('history').run()
     click(app,'返回上一步')
@@ -77,7 +79,9 @@ def test_branch_back_key_comparison_and_selected_run_export(monkeypatch):
     if not app.toggle(key='history_details').value:
         app.toggle(key='history_details').set_value(True).run()
     app.selectbox(key='history_dimension').set_value('channel').run()
-    click(app,'修改维度重新分析');click(app,'开始分析')
+    click(app,'修改维度重新分析');click(app,'确认恢复配置')
+    assert counts['run_agent_analysis']==2
+    click(app,'重新运行该分析')
     channel=history.nodes[-1]
     assert channel.parent_run_id==parent.run_id
     assert compare_runs(city,channel)['status']=='not_comparable'
@@ -150,12 +154,15 @@ def test_window_branches_generate_descriptive_differences_without_view_analysis(
     app.date_input(key='history_current_end').set_value(end)
     app.date_input(key='history_baseline_end').set_value(end-timedelta(days=7)).run()
     click(app,'修改对比基准');assert counts['run_agent_analysis']==1
-    click(app,'开始分析'); first=history.nodes[-1]
+    click(app,'确认恢复配置');assert counts['run_agent_analysis']==1
+    click(app,'重新运行该分析'); first=history.nodes[-1]
     app.segmented_control(key='workbench_page').set_value('history').run()
     if not app.toggle(key='history_details').value: app.toggle(key='history_details').set_value(True).run()
     app.date_input(key='history_current_end').set_value(end-timedelta(days=1))
     app.date_input(key='history_baseline_end').set_value(end-timedelta(days=8)).run()
-    click(app,'修改对比基准');click(app,'开始分析');second=history.nodes[-1]
+    click(app,'修改对比基准');click(app,'确认恢复配置')
+    assert counts['run_agent_analysis']==2
+    click(app,'重新运行该分析');second=history.nodes[-1]
     compared=compare_runs(first,second)
     assert compared['status']=='context_differs',compared
     assert compared['rows'] and compared['rows'][0]['unit']=='单'

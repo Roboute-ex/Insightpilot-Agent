@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 import inspect
 import math
+import re
 import numpy as np
 
 from insightpilot.ui.experiment_display import experiment_display, finite_number
@@ -132,25 +133,45 @@ def _main_comparisons(package: dict[str, Any]) -> list[dict[str, Any]]:
     return main or [item for item in values if isinstance(item, dict)][:6]
 
 
-def _format_metric_value(metric_id: str, value: Any) -> str:
+def _format_metric_value(metric_id: str, value: Any, *, unit: str | None = None) -> str:
     if finite_number(value) == "不可计算":
         return "不可计算"
     try:
         numeric = float(value)
     except (TypeError, ValueError):
         return str(value)
-    if metric_id.endswith("_rate") or metric_id in {"ctr", "cvr", "conversion_rate"}:
+    rate = unit == "比例" if unit is not None else metric_id.endswith("_rate") or metric_id in {"ctr", "cvr", "conversion_rate"}
+    if rate:
         return f"{numeric:.1%}"
     if metric_id in {"revenue", "refund_amount", "average_order_value"}:
         return f"{numeric:,.2f}"
     return f"{numeric:,.0f}" if abs(numeric) >= 10 else f"{numeric:,.2f}"
 
 
-def _render_kpis(package: dict[str, Any], view_mode: str) -> None:
-    comparisons = _main_comparisons(package)[:6]
+def _comparison_note(value: Any) -> str:
+    """Keep concrete completeness/calculation problems; omit known implementation prose."""
+    notes = []
+    for part in str(value or "").split("；"):
+        part = part.strip()
+        complete = re.fullmatch(r"基准日期完整性 (\d+)/(\d+)", part)
+        if complete and complete[1] == complete[2]:
+            continue
+        if re.fullmatch(r"z-score 使用总体标准差，基准样本数 \d+", part):
+            continue
+        if part in {"阈值不代表显著性", "比率采用分子合计/分母合计"}:
+            continue
+        if part:
+            notes.append(part)
+    return "；".join(notes)
+
+
+def _render_kpis(package: dict[str, Any], view_mode: str, *, comparisons=None, heading="核心指标表现", result=None) -> None:
+    from app.components.diagnostic_summary import metric_unit
+    comparisons = _main_comparisons(package)[:6] if comparisons is None else comparisons
     if not comparisons:
         return
-    st.subheader("核心指标表现", anchor=False)
+    if heading:
+        st.subheader(heading, anchor=False)
     for start in range(0, len(comparisons), 3):
         columns = st.columns(3)
         for column, item in zip(columns, comparisons[start:start + 3]):
@@ -159,12 +180,29 @@ def _render_kpis(package: dict[str, Any], view_mode: str) -> None:
             delta = float(raw_delta or 0.0)
             delta_text = "不可计算" if finite_number(raw_delta) == "不可计算" else f"{'上升' if delta > 0 else '下降' if delta < 0 else '持平'} {abs(delta):.1%}"
             severity = {"HIGH": "高风险", "MEDIUM": "需要关注", "LOW": "正常波动"}.get(str(item.get("severity")), "待复核")
+            absolute = item.get("absolute_change")
+            unit = metric_unit(result or {}, metric_id, str(item.get("unit") or "单位未确认"))
+            rate = unit == "比例"
+            absolute_text = "不可计算" if finite_number(absolute) == "不可计算" else (
+                f"{float(absolute) * 100:+.2f} 个百分点" if rate else f"{float(absolute):+,.2f}")
             with column:
                 render_compact_summary_card(
                     format_metric_name(metric_id, developer_mode=should_show_developer_details(view_mode)),
-                    f"{_format_metric_value(metric_id, item.get('current_value'))}\n较{item.get('baseline_period', '基准')}{delta_text}",
+                    [f"当前值：{_format_metric_value(metric_id, item.get('current_value'), unit=unit)}（{unit}）",
+                     f"{item.get('baseline_period', '基准')}：{_format_metric_value(metric_id, item.get('baseline_value'), unit=unit)}",
+                     f"绝对变化：{absolute_text}；相对变化：{delta_text}"],
                     status=severity,
                 )
+                note = _comparison_note(item.get("confidence_note"))
+                if note:
+                    st.caption(_safe_string(note))
+    shared_notes = []
+    if any("比率采用分子合计/分母合计" in str(item.get("confidence_note", "")) for item in comparisons):
+        shared_notes.append("比率按总分子/总分母计算")
+    if any("阈值不代表显著性" in str(item.get("confidence_note", "")) for item in comparisons):
+        shared_notes.append("异常等级不代表统计显著性")
+    if shared_notes:
+        st.caption("；".join(shared_notes) + "。")
 
 
 def _render_result_highlights(package: dict[str, Any], *, synthetic: bool = False) -> None:
@@ -247,8 +285,15 @@ def _render_experiment_summary(package: dict[str, Any], view_mode: str) -> None:
         st.caption(f"分析指标：{format_metric_name(metric_id, developer_mode=True)}")
 
 
-def _render_findings(result: dict[str, Any], view_mode: str) -> None:
-    findings = result.get("findings", [])
+def _render_findings(result: dict[str, Any], view_mode: str, *, findings=None) -> None:
+    findings = result.get("findings", []) if findings is None else findings
+    visible = []
+    for finding in findings:
+        reference_only = re.fullmatch(r"结果表 (\S+) 第 \d+ 行提供可复核的实际数值。", finding) if isinstance(finding, str) else None
+        if reference_only and reference_only[1] in (result.get("result_tables") or {}):
+            continue
+        visible.append(finding)
+    findings = visible
     if not findings:
         return
     with st.expander("查看补充发现", expanded=False, icon=":material/notes:"):
@@ -279,9 +324,8 @@ def _exploration_chart_settings(result):
     if st.session_state.get(key) not in options:
         st.session_state[key] = options[0]
     selected = st.selectbox("展示图型", options, key=key, format_func=labels.get)
-    st.caption("这里只改变已计算结果的展示；改变指标、维度、时间范围、粒度或筛选，请回数据探索明确生成新结果。")
     if kind == "pivot" and metadata.get("aggregation") not in {"sum", "count"}:
-        st.caption("当前指标非可加总量，不提供堆叠图；合计采用对应原始范围重新聚合的实际结果。")
+        st.caption("当前指标不可加总，不提供堆叠图。")
     if kind == "grouped" and selected == "line" and not metadata.get("request", {}).get("time_grain"):
         st.caption("连线仅连接当前分组的展示顺序，不表示时间连续性或因果关系。")
     return kind, selected
@@ -329,8 +373,10 @@ def _render_visuals(result: dict[str, Any]) -> None:
     for warning in entry["warnings"]:
         st.warning(warning)
     pairs = entry["pairs"]
-    st.caption(f"当前仅构建所选图表；展示预算每图 {config.chart_max_points:,} 点。展示筛选或确定性采样不参与统计计算，完整结果与报告结论保持原口径。")
+    st.caption(f"每图最多显示 {config.chart_max_points:,} 点；统计使用全量数据。")
     for spec, figure in pairs:
+        from app.components.result_layout import render_chart_limits
+        render_chart_limits(spec)
         if spec.description:
             st.caption(synthetic_display_text(spec.description) if result.get("data_source_type") == "synthetic" else spec.description)
         st.plotly_chart(figure, width="stretch", key=f"chart_{spec.chart_id}")
@@ -386,8 +432,10 @@ def _render_tables(result: dict[str, Any], view_mode: str) -> None:
         return
     if st.session_state.get("result_table_selector") not in names:
         st.session_state["result_table_selector"] = names[0]
-    key = st.selectbox("选择结果明细表", names, format_func=lambda value: TABLE_TITLES.get(value, value), key="result_table_selector")
-    title = TABLE_TITLES.get(key, key)
+    from app.components.result_layout import RESULT_TITLES
+    titles = {**RESULT_TITLES, **TABLE_TITLES}
+    key = st.selectbox("选择结果明细表", names, format_func=lambda value: titles.get(value, value), key="result_table_selector")
+    title = titles.get(key, key)
     frame = tables[key]
     run_id = str(result.get("run_manifest", {}).get("run_id", "analysis"))
     control_key = f"result_table_{run_id}_{key}"
@@ -462,6 +510,58 @@ def _render_tables(result: dict[str, Any], view_mode: str) -> None:
         st.caption(f"结果表标识：{key}")
 
 
+def _render_diagnostic_overview(result: dict[str, Any], package: dict[str, Any], projection: dict[str, Any], view_mode: str) -> None:
+    from app.components.diagnostic_summary import supplementary_findings
+    from app.components.result_layout import render_key_charts, render_primary_table, render_result_actions
+    display = synthetic_display_text if result.get("data_source_type") == "synthetic" else str
+    st.subheader("发生了什么", anchor=False)
+    _render_kpis(package, view_mode, comparisons=projection["comparisons"], heading=None, result=result)
+    st.subheader("变化集中在哪里", anchor=False)
+    groups = projection["contribution_groups"]
+    if groups:
+        metric = projection["metric_id"]
+        rate = projection["metric_unit"] == "比例"
+        dimensions = {"city": "城市", "channel": "渠道", "device": "设备", "app_version": "版本",
+                      "user_segment": "用户分组", "region": "区域", "platform": "平台"}
+        for group in groups:
+            lines = []
+            for row in group["rows"]:
+                value = float(row["contribution_value"])
+                change = f"{value * 100:+.2f} 个百分点" if rate else f"{value:+,.2f} {projection['metric_unit']}"
+                lines.append(display(f"{row.get('dimension_value')}：变化贡献 {change}；{row.get('confidence_flag', '前提待复核')}"))
+            render_compact_summary_card(
+                f"{format_metric_name(metric)} · {dimensions.get(group['dimension'], group['dimension'])}", lines)
+        st.caption("每个维度分别展示绝对变化贡献最大的已有分组；不同维度不可相加。变化贡献是描述性分解，不证明变化原因。完整正负项与其他分组在明细中保留。")
+    else:
+        static = (result.get("result_tables") or {}).get("dimension_contribution")
+        if isinstance(static, pd.DataFrame) and not static.empty:
+            st.caption("本次仅有静态分组表现，未计算分组的跨期变化贡献；静态份额不能解释指标变化。")
+        else:
+            st.caption("本次没有可展示的分组变化贡献，不能据此判断变化集中在哪个分组。")
+    render_key_charts(result)
+    st.subheader("证据支持到哪一步", anchor=False)
+    render_primary_table(result)
+    covered = list(projection["covered_evidence"])
+    for entry in projection["evidence"]:
+        item = entry["record"]
+        if not entry["represented"]:
+            st.write(display(_safe_string(str(item.get("claim", "")))))
+            covered.append(item)
+        caveat = item.get("caveat", "")
+        # The exact same comparison caveat has already appeared beside its KPI.
+        if entry["represented"] and caveat in {row.get("confidence_note") for row in projection["comparisons"]}:
+            continue
+        note = _comparison_note(caveat) if item.get("result_table") == "metric_comparisons" else caveat
+        if note:
+            st.caption(display(_safe_string(str(note))))
+    if not projection["evidence"]:
+        st.warning("当前缺少可对应到本次结果表的结构化证据；已有数值需结合口径与质量复核。")
+    _render_findings(result, view_mode, findings=supplementary_findings(result, covered))
+    render_caveats(result.get("caveats", []), view_mode)
+    st.subheader("下一步", anchor=False)
+    render_result_actions(result)
+
+
 def _render_overview(result: dict[str, Any], view_mode: str) -> None:
     package = result.get("analysis_result_package", {}) if isinstance(result.get("analysis_result_package"), dict) else {}
     if result.get("execution_mode") == "plan_only" or package.get("scenario") == "plan_only":
@@ -477,42 +577,50 @@ def _render_overview(result: dict[str, Any], view_mode: str) -> None:
         for error in result.get("errors", []):
             st.error(_safe_string(str(error)))
         return
-    st.subheader("执行摘要", anchor=False)
-    summary = format_metric_text(package.get("executive_summary") or result.get("summary") or "本次分析已执行。")
-    st.write(synthetic_display_text(summary) if result.get("data_source_type") == "synthetic" else summary)
-    from app.components.result_layout import render_causal_kpis, render_primary_table, render_key_charts, render_result_actions, render_exploration_kpis
+    from app.components.diagnostic_summary import diagnostic_projection
+    projection = diagnostic_projection(result)
+    if projection is not None:
+        _render_diagnostic_overview(result, package, projection, view_mode)
+        return
+    from app.components.result_layout import render_causal_kpis, render_primary_table, render_key_charts, render_result_actions, render_exploration_kpis, exploration_heading, exploration_ui_items
+    heading = exploration_heading(result)
+    st.subheader(heading or "执行摘要", anchor=False)
+    raw_summary = package.get("executive_summary") or result.get("summary") or "本次分析已执行。"
+    if not heading:
+        summary = format_metric_text(raw_summary)
+        st.write(synthetic_display_text(summary) if result.get("data_source_type") == "synthetic" else summary)
     is_causal = render_causal_kpis(result)
     is_exploration = render_exploration_kpis(result)
     if not is_causal and not is_exploration:
         _render_experiment_summary(package, view_mode)
-        _render_kpis(package, view_mode)
+        _render_kpis(package, view_mode, result=result)
     if any(package.get(key) for key in ("anomalies", "dimension_contributions", "funnel_results", "recommendations")) and not is_causal and not is_exploration:
         _render_result_highlights(package, synthetic=result.get("data_source_type") == "synthetic")
     render_key_charts(result)
     render_primary_table(result)
-    render_result_actions()
-    _render_findings(result, view_mode)
-    render_caveats(result.get("caveats", []), view_mode)
-    reviewer = result.get("reviewer", {}) if isinstance(result.get("reviewer"), dict) else {}
-    columns = st.columns(3)
-    with columns[0]:
-        render_compact_summary_card("流程检查评分", str(reviewer.get("score", "-")))
-    with columns[1]:
-        render_compact_summary_card("检查状态", {"PASS": "通过", "WARN": "需要关注", "FAIL": "未通过"}.get(reviewer.get("status"), "待检查"))
-    with columns[2]:
-        render_compact_summary_card("主要警告", str(len(reviewer.get("issues", []))))
-    st.caption("流程检查评分不代表统计结论百分之百正确；统计前提与证据状态请查看质量检查。")
-    details = st.expander("查看分析方案", expanded=False, icon=":material/account_tree:", key="overview_plan_open", on_change="rerun")
-    if details.open:
-        with details:
-            render_plan_panel(result, view_mode="demo")
+    render_result_actions(result)
+    _render_findings(result, view_mode, findings=exploration_ui_items(result, result.get("findings", []), summary=raw_summary))
+    caveats = exploration_ui_items(result, result.get("caveats", []))
+    if caveats:
+        render_caveats(caveats, view_mode)
 
 
 def _remember_result_tab() -> None:
     st.session_state["performance_selected_result_tab"] = st.session_state.get("result_tabs")
 
 
-def render_result_panel(result: dict[str, Any], view_mode: str = "demo") -> None:
+def render_result_panel(result: dict[str, Any], view_mode: str = "demo", *,
+                        run_context: dict[str, Any] | None = None, previous_result: bool = False) -> None:
+    status = result.get("execution_status", "COMPLETED")
+    preview = result.get("execution_mode") == "plan_only" or status == "PREVIEW"
+    label = "方案预览" if preview else {
+        "COMPLETED": "已完成", "NEEDS_INPUT": "待补充信息", "INVALID_INPUT": "配置无效",
+        "UNSUPPORTED": "当前条件不支持", "WAITING_APPROVAL": "等待审批", "FAILED": "分析失败",
+    }.get(status, "尚未完成")
+    color = "blue" if preview else "green" if status == "COMPLETED" else "red" if status == "FAILED" else "orange"
+    with st.container(horizontal=True, vertical_alignment="center", gap=12):
+        st.markdown("**上次分析结果**" if previous_result else "**分析结果**")
+        st.badge(label, color=color, help="执行状态不代表统计前提或因果识别假设已验证。")
     tabs = [t("tab.overview"), t("tab.visual"), t("tab.results"), t("tab.export")]
     labels = dict(zip(tabs, ["结论", "图表", "明细", "报告"]))
     requested = st.session_state.pop("requested_result_tab", None)
@@ -531,8 +639,12 @@ def render_result_panel(result: dict[str, Any], view_mode: str = "demo") -> None
     renderers = {tabs[0]: lambda: _render_overview(result, "demo"), tabs[1]: lambda: _render_visuals(result),
                  tabs[2]: lambda: _render_tables(result, "professional"), tabs[3]: reports}
     renderers[selected]()
-    from insightpilot.analysis.quality import quality_rows
-    st.caption("质量摘要：" + "；".join(row["检查维度"] + "：" + row["状态"] for row in quality_rows(result)))
+    from app.components.diagnostic_summary import visible_quality_risks
+    for severity, risk in visible_quality_risks(result, with_severity=True):
+        if severity == "error":
+            st.error(_safe_string(risk))
+        else:
+            st.warning(_safe_string(risk))
     quality = st.expander("查看口径与质量", expanded=bool(st.session_state.get("guided_quality", False)), key="guided_quality", on_change="rerun")
     if quality.open:
         with quality:
@@ -542,6 +654,14 @@ def render_result_panel(result: dict[str, Any], view_mode: str = "demo") -> None
     details = st.expander("技术详情", expanded=bool(st.session_state.get("guided_technical", False)), key="guided_technical", on_change="rerun")
     if details.open:
         with details:
+            from insightpilot.analysis.quality import QUALITY_NOTICE, quality_rows
+            st.dataframe(pd.DataFrame(quality_rows(result)), hide_index=True, width="stretch")
+            st.caption(QUALITY_NOTICE)
+            manifest = result.get("run_manifest") or {}
+            st.caption("运行编号：" + str(manifest.get("run_id") or "未记录"))
+            if isinstance(run_context, dict):
+                st.caption("数据修订：" + str(run_context.get("dataset_revision", "未记录")))
+            st.caption("此处方案、证据和报告绑定已提交的运行；未提交的新参数不会改变它。")
             render_plan_panel(result, view_mode="developer")
             render_lineage_panel(result, "developer")
             render_developer_panel(result, "developer")

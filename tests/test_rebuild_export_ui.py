@@ -99,6 +99,7 @@ def test_actual_preview_execute_mode_change_and_stale_result():
     app = AppTest.from_file(str(path), default_timeout=90)
     app.session_state['demo_scale']='small'
     app.run()
+    app.session_state['guided_advanced']=True
     app.session_state['guided_plan']=True; app.run()
     next(item for item in app.button if item.label == '预览分析方案').click().run()
     assert not app.exception

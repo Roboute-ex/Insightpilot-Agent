@@ -15,9 +15,42 @@ def clear_request_confirmations() -> None:
             st.session_state.pop(key, None)
 
 
+def _mounted_form_keys() -> set[str]:
+    """Visible form values stay browser-owned until submit or explicit restore."""
+    page = st.session_state.get("workbench_page", "workbench")
+    keys = set()
+    section = st.session_state.get("exploration_section", "fields")
+    if page == "explore" and section in {"distribution", "grouped", "pivot"}:
+        keys.update("exploration_" + name for name in (
+            "date", "grain", "date_from", "date_to", "filter_column", "filter_operator",
+            "filter_value", "filter_null", "top_n", "confirmed"))
+        if st.session_state.get("exploration_base_filters"):
+            keys.add("exploration_keep_filters")
+        if section == "distribution":
+            keys.add("exploration_field")
+        else:
+            keys.update({"exploration_metric", "exploration_row", "exploration_unit"})
+            if st.session_state.get("exploration_aggregation") == "ratio_of_sums":
+                keys.update({"exploration_numerator", "exploration_denominator"})
+            if section == "pivot":
+                keys.add("exploration_column")
+    if page == "workbench" and st.session_state.get("guided_advanced", False):
+        method = st.session_state.get("playbook_selector")
+        if method == PLAYBOOK_AUTO:
+            method = ((st.session_state.get("guided_advice") or {}).get("effective_method") or {}).get("id")
+        if method not in {None, "legacy", PLAYBOOK_NONE, PLAYBOOK_AUTO}:
+            keys.update(key for key in st.session_state if key.startswith(f"playbook_parameter_{method}_"))
+    return keys
+
+
 def initialize_guidance() -> None:
     # Keep stable configuration even when its widget is deliberately not rendered.
+    mounted_form_keys = _mounted_form_keys()
     for key in list(st.session_state):
+        # Self-assignment marks a value as new and sends set_value=True to the
+        # browser, overwriting pending form edits even if the widget stays mounted.
+        if key in mounted_form_keys:
+            continue
         if (key.startswith(("playbook_parameter_", "mapping_", "exploration_chart_type_"))
                 or key.startswith("result_table_") and key.endswith(("_size", "_sort", "_descending", "_filter_column", "_filter_text", "_page"))
                 or key in {

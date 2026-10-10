@@ -23,9 +23,11 @@ def test_demo_mode_is_default_and_hides_technical_json() -> None:
     assert "历史比较" in app.segmented_control(key="workbench_page").options
     assert len(app.json) == 0
     visible_headings = [item.value for item in app.subheader]
-    assert "执行摘要" in visible_headings
+    assert [title for title in visible_headings if title in {
+        "发生了什么", "变化集中在哪里", "证据支持到哪一步", "下一步"
+    }] == ["发生了什么", "变化集中在哪里", "证据支持到哪一步", "下一步"]
     assert "分析方案摘要" not in visible_headings
-    app.session_state["overview_plan_open"] = True
+    app.session_state["guided_technical"] = True
     app.run()
     assert "分析方案摘要" in [item.value for item in app.subheader]
     assert "Analysis Plan" not in visible_headings

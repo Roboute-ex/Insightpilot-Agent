@@ -46,6 +46,45 @@ def test_navigation_and_form_draft_do_no_work(monkeypatch):
     assert not session_snapshot(app).get("performance_pending_branch")
 
 
+def test_workbench_results_follow_question_and_run_button_without_rerunning(monkeypatch):
+    counts = watch(monkeypatch)
+    app = start()
+    press(app, "guided_run")
+    result = app.session_state["last_analysis_result"]
+    assert result["execution_status"] == "COMPLETED"
+    assert counts["analysis"] == 1 and counts["export"] == 0
+    run_id = result["run_manifest"]["run_id"]
+
+    def assert_results_after_inputs():
+        # AppTest iterates containers in their displayed order. Checking the
+        # whole tree catches a result placeholder reserved above the inputs,
+        # even when the result rendering function is called after execution.
+        keys = [getattr(element, "key", None) for element in app.main]
+        assert keys.index("question") < keys.index("guided_run") < keys.index("result_tabs"), keys
+
+    assert_results_after_inputs()
+    assert not any(item.key in {"workbench_all_methods", "workbench_result_methods", "workbench_edit_config"} for item in app.button)
+    visible = "\n".join(str(item.value) for kind in ("caption", "markdown") for item in getattr(app, kind))
+    assert "当前任务：已完成" not in visible
+    assert "表单中未提交的编辑尚未参与本结果" not in visible
+    assert run_id not in visible
+    before = counts.copy()
+    for tab in ("可视化诊断", "结果明细", "报告导出", "分析概览"):
+        app.segmented_control(key="result_tabs").set_value(tab).run()
+        assert not app.exception
+        assert_results_after_inputs()
+        assert app.session_state["last_analysis_result"]["run_manifest"]["run_id"] == run_id
+        assert_no_work_since(counts, before)
+    app.session_state["guided_technical"] = True
+    app.run()
+    assert not app.exception
+    technical = next(item for item in app.expander if item.key == "guided_technical")
+    technical_text = "\n".join(str(item.value) for item in technical if item.type in {"caption", "markdown"})
+    assert run_id in technical_text
+    assert "数据修订" in technical_text
+    assert_no_work_since(counts, before)
+
+
 def test_explicit_pivot_runs_once_and_renders_real_result(monkeypatch):
     small_table(monkeypatch)
     counts = watch(monkeypatch)
@@ -60,7 +99,7 @@ def test_explicit_pivot_runs_once_and_renders_real_result(monkeypatch):
     assert result["execution_status"] == "COMPLETED", result.get("errors")
     totals = result["result_tables"]["exploration_totals"]
     assert totals.loc[totals["scope"].eq("all"),"metric_value"].item() == 30
-    assert "已生成探索结果" in [x.value for x in app.subheader]
+    assert "交叉表概览" in [x.value for x in app.subheader]
     before = counts.copy()
     for page in ("methods","workbench","history","explore"):
         navigate(app,page)
@@ -105,7 +144,8 @@ def test_city_event_identity_and_explicit_child(monkeypatch):
     assert counts["analysis"]-before["analysis"]==1
     new = session.history.nodes[-1]
     assert app.session_state["exploration_section"] == "grouped"
-    assert "已生成探索结果" in [x.value for x in app.subheader]
+    expected_date = config["parameters"]["exploration_request"]["date_from"]
+    assert any(x.value.endswith(f"当日概览（{expected_date}）") for x in app.subheader)
     assert new.parent_run_id==node.run_id
     assert new.run_id!=node.run_id
     assert node.config == before_config

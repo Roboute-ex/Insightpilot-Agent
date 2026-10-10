@@ -1,4 +1,4 @@
-"""Chinese-first, result-first Streamlit entry point for InsightPilot Agent."""
+"""Chinese-first guided Streamlit workbench for InsightPilot Agent."""
 
 from __future__ import annotations
 
@@ -28,11 +28,12 @@ from app.components.data_source_panel import (
 )
 from app.components.export_panel import prepare_export_payloads
 from app.components.mapping_panel import render_mapping_panel
-from app.components.history_panel import apply_pending_branch, render_history_controls
+from app.components.history_panel import apply_pending_branch, render_history_controls, render_restore_prompt
+from app.components.analysis_context import render_analysis_context, project_run_context
 from app.components.metric_definition_panel import prepare_and_render_clarification, refresh_result_presentation
 from app.components.question_panel import render_example_question_selector
 from app.components.guidance_panel import initialize_guidance, render_goal_backend, render_advice, clear_request_confirmations, question_changed
-from app.components.workbench_shell import render_workbench_navigation, render_methods_entry, render_data_summary, render_config_summary
+from app.components.workbench_shell import render_workbench_navigation, render_data_summary, render_config_summary
 from app.components.method_gallery import render_method_gallery, render_common_methods
 from insightpilot.planning.planner import prepare_analysis_request
 from app.components.result_panel import render_result_panel
@@ -209,6 +210,7 @@ def _accept_analysis_result(result, context, *, cache_hit: bool) -> None:
     if not cache_hit:
         _clear_result_views()
     st.session_state["performance_analysis_cache_hit"] = cache_hit
+    context["run_id"] = str((result.get("run_manifest") or {}).get("run_id") or "")
     st.session_state["last_analysis_result"] = result
     st.session_state["last_run_context"] = context
     session = _analysis_session()
@@ -217,11 +219,16 @@ def _accept_analysis_result(result, context, *, cache_hit: bool) -> None:
     if (status == "COMPLETED" and result.get("execution_mode") != "plan_only"
             and snapshot is not None and context.get("analysis_config_snapshot") is not None):
         try:
+            activate = context.get("view_epoch", 0) == st.session_state.get("performance_view_epoch", 0)
             node = session.history.add(result, context["analysis_config_snapshot"],
                 dataset_id=snapshot.dataset_id, revision=snapshot.revision,
                 schema={name: metadata.get("columns", []) for name, metadata in snapshot.metadata.items()},
-                node_id=None if cache_hit else context.get("node_id"))
-            st.session_state["history_run_selector"] = node.node_id
+                node_id=None if cache_hit else context.get("node_id"), activate=activate)
+            if activate:
+                st.session_state["history_run_selector"] = node.node_id
+                st.session_state.pop("performance_restored_run_id", None)
+            else:
+                st.info("已提交的分析已完成，保存在历史比较中；当前查看的历史分析保持不变。")
         except (ValueError, MemoryError) as exc:
             st.warning(f"历史记录未保留：{_safe_string(str(exc))}")
     status = result.get("execution_status", "COMPLETED")
@@ -231,9 +238,7 @@ def _accept_analysis_result(result, context, *, cache_hit: bool) -> None:
         render_result_note("当前仅展示分析方案，尚未执行实际计算。")
     elif status == "COMPLETED":
         if cache_hit:
-            st.success("已复用同一数据修订与完整配置的上次成功结果。")
-        else:
-            render_result_note("分析已完成。以下内容由当前数据实际计算生成。")
+            st.caption("已复用相同配置的成功结果。")
     else:
         label = {"NEEDS_INPUT": "待补充信息", "UNSUPPORTED": "当前条件不支持", "INVALID_INPUT": "配置无效", "WAITING_APPROVAL": "等待审批"}.get(status, "分析失败")
         reasons = result.get("analysis_advice", {}).get("blocking_issues", [])
@@ -263,7 +268,7 @@ def _request_analysis(snapshot, current_snapshot, snapshot_signature, *, executi
         return
     session = _analysis_session()
     history = session.history
-    history.bind_dataset(snapshot.dataset_id, snapshot.revision)
+    history.bind_dataset(snapshot.dataset_id, snapshot.revision, preserve_history=True)
     key_config = {**current_snapshot, "execution_mode": execution_mode}
     if approved_plan_id is not None:
         key_config["approved_plan_id"] = approved_plan_id
@@ -271,6 +276,12 @@ def _request_analysis(snapshot, current_snapshot, snapshot_signature, *, executi
         config=key_config, catalog_version=current_snapshot["catalog_version"],
         computation_version=current_snapshot["computation_version"])
     pending = st.session_state.get("performance_background_pending")
+    if (explicit and pending and pending.get("kind") == "analysis"
+            and pending.get("revision") == str(snapshot.revision)
+            and pending.get("context", {}).get("dataset_id") == snapshot.dataset_id
+            and pending.get("context", {}).get("snapshot_signature") == snapshot_signature):
+        st.info("相同分析请求已提交，正在处理；重复点击不会创建第二个任务。")
+        return
     if explicit:
         parent = st.session_state.get("performance_branch_parent")
         if parent is not None and not any(n.run_id == parent for n in history.nodes):
@@ -284,7 +295,9 @@ def _request_analysis(snapshot, current_snapshot, snapshot_signature, *, executi
         "data_source_type", "column_mapping", "playbook_id", "parameters", "dataset_revision")}
     recorded = {k: deepcopy(v) for k, v in current_snapshot.items() if k not in {"playbook_definition", "catalog_version", "computation_version"}}
     context.update(snapshot_signature=snapshot_signature, table_metadata=snapshot.metadata,
-                   analysis_config_snapshot=recorded, node_id=node_id)
+                   analysis_config_snapshot=recorded, node_id=node_id,
+                   view_epoch=st.session_state.get("performance_view_epoch", 0) if explicit else
+                       (pending or {}).get("context", {}).get("view_epoch", 0))
     cached = None if force else session.lookup(key)
     if cached is not None:
         if background_enabled() and pending and pending["kind"] == "analysis":
@@ -317,7 +330,8 @@ def _request_analysis(snapshot, current_snapshot, snapshot_signature, *, executi
     ready, output = request_work("analysis", task_key, snapshot.revision, partial(_analysis_worker, arguments),
         result_max_bytes=session.cache.max_bytes, size_estimator=lambda item: item[1],
         context={"snapshot_signature": snapshot_signature, "dataset_id": snapshot.dataset_id,
-            "execution_mode": execution_mode, "approved_plan_id": approved_plan_id, "node_id": node_id}, explicit_retry=explicit)
+            "execution_mode": execution_mode, "approved_plan_id": approved_plan_id, "node_id": node_id,
+            "view_epoch": context["view_epoch"]}, explicit_retry=explicit)
     if ready:
         if node_id != history.request_node_id:
             return
@@ -402,10 +416,12 @@ def main() -> None:
         render_background_status()
         if st.session_state.get("last_analysis_result") is not None:
             st.info("当前数据尚未就绪，上次结果不能作为此数据的分析结果。")
+        if page in {"workbench", "history"}:
+            render_analysis_context(analysis_session, snapshot)
         return
     if snapshot is not None:
         previous_identity = analysis_session.history.dataset_identity
-        analysis_session.history.bind_dataset(snapshot.dataset_id, snapshot.revision)
+        analysis_session.history.bind_dataset(snapshot.dataset_id, snapshot.revision, preserve_history=True)
         if previous_identity is not None and previous_identity != (snapshot.dataset_id, str(snapshot.revision)):
             for key in list(st.session_state):
                 if key.startswith(("mapping_", "playbook_parameter_", "approve_")) or key in {
@@ -418,16 +434,20 @@ def main() -> None:
         st.session_state["question"] = default_question
     st.session_state["_default_question"] = default_question
     summary_slot = st.container()
-    result_slot = st.container()
+    plan_slot = None
     if page == "workbench":
         with st.container(horizontal=True, gap=24, key="workbench_columns"):
             question_column = st.container(width=600, key="workbench_question_column")
             config_column = st.container(width=300, key="workbench_config_column")
         with question_column:
             st.text_input("你想分析什么？", key="question", placeholder="例如：数据中最近完整日的订单量为什么下降？", on_change=question_changed)
+            render_example_question_selector(str(st.session_state.get("current_scenario_id", "custom")), view_mode, snapshot)
             advice_slot = st.container()
-            actions_slot = st.container()
+        with config_column:
+            config_summary_slot = st.container()
             configuration_slot = st.container()
+        # Keep the primary action after both columns when they stack on narrow screens.
+        actions_slot = st.container()
     else:
         question_column = st.container()
         advice_slot = question_column
@@ -443,7 +463,6 @@ def main() -> None:
     selected_playbook_id = st.session_state.get("playbook_selector", PLAYBOOK_AUTO)
     if page == "workbench":
         with configuration_slot:
-            render_methods_entry()
             advanced = st.expander("调整方法与参数", expanded=bool(st.session_state.get("guided_advanced", False)), key="guided_advanced", on_change="rerun")
             if advanced.open:
                 with advanced:
@@ -478,6 +497,7 @@ def main() -> None:
                             parameters = deepcopy(st.session_state.get("guided_parameters") or {})
                             st.caption("参数表单内的编辑只有点击“应用参数并更新建议”后才生效。")
                     st.checkbox("强制重新计算（忽略上次相同配置结果）", key="force_recompute")
+                    plan_slot = st.container()
     force_recompute = bool(st.session_state.get("force_recompute", False))
     selection_source = st.session_state.get("guided_selection_source", "automatic")
     request_config = {"question": question, "goal_mode": goal_mode, "playbook_id": selected_playbook_id,
@@ -499,7 +519,7 @@ def main() -> None:
     with summary_slot:
         render_data_summary(snapshot, prepared_request)
     if page == "workbench":
-        with config_column:
+        with config_summary_slot:
             render_config_summary(prepared_request, request_config)
     current_snapshot = {
         **request_config, "use_langgraph": use_langgraph, "data_source_type": data_source_type,
@@ -518,8 +538,12 @@ def main() -> None:
     preview_plan = False
     if page == "workbench":
         with actions_slot:
-            run_analysis = submit_requested or st.button("开始分析", type="primary", icon=":material/play_arrow:", disabled=not can_submit, key="guided_run")
-            render_example_question_selector(str(st.session_state.get("current_scenario_id", "custom")), view_mode, snapshot)
+            restored = bool(st.session_state.get("performance_restored_run_id"))
+            if restored:
+                st.caption("历史配置已恢复为草稿，尚未重新计算。将按当前数据重新预检，并创建新的运行记录。")
+            run_analysis = submit_requested or st.button("重新运行该分析" if restored else "开始分析", type="primary", icon=":material/play_arrow:", disabled=not can_submit, key="guided_run")
+    if plan_slot is not None:
+        with plan_slot:
             plan_details = st.expander("查看分析方案", expanded=bool(st.session_state.get("guided_plan", False)), key="guided_plan", on_change="rerun")
             if plan_details.open:
                 with plan_details:
@@ -551,44 +575,52 @@ def main() -> None:
             try:
                 _request_analysis(snapshot, current_snapshot, snapshot_signature,
                     execution_mode="plan_only" if preview_plan else "execute",
-                    force=force_recompute, explicit=True)
+                    force=force_recompute or bool(st.session_state.get("performance_restored_run_id")), explicit=True)
             except Exception as exc:
                 st.session_state["performance_task_status"] = "failed"
                 st.error(f"分析执行失败：{_safe_string(str(exc))}")
     if background_enabled():
         active_task = task_snapshot()
         if (active_task is not None or st.session_state.get("performance_background_pending")
-                or st.session_state.get("_background_draining") or st.session_state.get("last_run_context")):
+                or st.session_state.get("_background_draining")
+                or st.session_state.get("performance_task_status") in {"failed", "cancelled", "busy"}):
             render_background_status()
-        else:
-            st.caption("数据准备已完成，尚未开始分析。")
 
-    selected_node_id = analysis_session.history.active_node_id if analysis_session.history.nodes else None
+    selected_node_id = analysis_session.history.active_node_id
     latest = st.session_state.get("last_analysis_result")
     context = st.session_state.get("last_run_context")
-    if selected_node_id and (latest is None or (latest.get("execution_status") == "COMPLETED" and latest.get("execution_mode") != "plan_only")):
-        node = analysis_session.history.get(selected_node_id)
-        if not analysis_session.history.result_available(node, analysis_session.current):
+    selected_node = None
+    viewing_other_request = isinstance(context, dict) and context.get("view_epoch", 0) != st.session_state.get("performance_view_epoch", 0)
+    if selected_node_id and (viewing_other_request or latest is None or (latest.get("execution_status") == "COMPLETED" and latest.get("execution_mode") != "plan_only")):
+        try:
+            selected_node = analysis_session.history.get(selected_node_id)
+        except ValueError:
+            pass
+        if (selected_node is None or not analysis_session.history.result_available(selected_node, analysis_session.current)
+                or not project_run_context(analysis_session.history, selected_node.node_id, snapshot)["source_available"]):
             latest = None
-            st.info("该历史结果已释放，需要恢复配置并重新执行。")
         else:
             latest = analysis_session.current
+            if not context or context.get("run_id") != selected_node.run_id:
+                context = {**selected_node.config, "dataset_revision": selected_node.dataset_revision}
     if (isinstance(context, dict) and snapshot is not None
             and str(context.get("dataset_revision")) != str(snapshot.revision)):
-        st.warning("上次运行结果绑定旧数据修订，当前引用已失效；请明确提交新分析。")
-        return
+        latest = None
     if page in {"workbench", "history"}:
-        with result_slot:
+        # Reserve results after the controls, preserving the input-to-result order.
+        with st.container(key="analysis_result_panel"):
+            render_analysis_context(analysis_session, snapshot)
             if isinstance(latest, dict):
-                result_run = str(latest.get("run_manifest", {}).get("run_id", ""))[:8]
-                submitted_revision = context.get("dataset_revision", "-") if isinstance(context, dict) else "-"
-                st.caption(f"下方结果基于上次提交的配置与数据修订 {submitted_revision}，运行 {result_run}。表单中未提交的编辑尚未参与本结果。")
                 stale_result = isinstance(context, dict) and context.get("snapshot_signature") != snapshot_signature
+                unfinished_request = (latest.get("execution_status") == "COMPLETED"
+                    and st.session_state.get("performance_task_status") in {"queued", "running", "cancel_requested", "cancelled", "failed", "busy"})
                 if stale_result:
                     if latest.get("execution_status") == "COMPLETED" and latest.get("execution_mode") != "plan_only":
                         st.warning("上次成功结果：它不是当前未完成请求的结果。编辑中的问题或参数不会混入其报告；请明确开始新的分析。")
                     else:
                         st.warning("上次运行尚未成功完成，且当前配置已变化；下方内容不是本次配置的分析结论。")
+                elif unfinished_request:
+                    st.info("本次请求尚未产生新结果，下面保留上次成功结果。")
                 query_plan = latest.get("query_plan", {})
                 review = latest.get("plan_review", {})
                 if query_plan.get("requires_approval") and review.get("decision") == "pending" and isinstance(context, dict):
@@ -610,12 +642,13 @@ def main() -> None:
                             st.session_state["performance_task_status"] = "failed"
                             st.error(f"批准后的只读查询执行失败：{_safe_string(str(exc))}")
                             return
-                latest = refresh_result_presentation(latest, prepared_request)
-                render_result_panel(latest, view_mode)
+                # Presentation and exports belong to the selected frozen run,
+                # never a newly edited form or a late task's different context.
+                render_result_panel(latest, view_mode, run_context=context, previous_result=stale_result or unfinished_request)
                 if page == "workbench" and st.session_state.get("performance_selected_result_tab", "分析概览") == "分析概览":
                     from app.components.drilldown_panel import render_drilldown_panel
                     render_drilldown_panel(latest, snapshot, analysis_session)
-            elif page == "history":
+            elif page == "history" and not selected_node_id:
                 st.info(t("empty.no_result"), icon=":material/info:")
 
     if page == "methods":
@@ -629,13 +662,8 @@ def main() -> None:
         else:
             st.info("还没有历史运行。先在分析工作台或数据探索中明确生成一次结果。")
     elif page == "workbench":
-        if not isinstance(latest, dict) or latest.get("execution_status") != "COMPLETED":
+        if not analysis_session.history.nodes and (not isinstance(latest, dict) or latest.get("execution_status") != "COMPLETED"):
             render_common_methods(prepared_request.get("analysis_advice") or {})
-        else:
-            with st.container(horizontal=True):
-                render_methods_entry(key="workbench_result_methods")
-                from app.components.workbench_shell import navigate
-                st.button("比较历史分析", key="workbench_compare_history", on_click=navigate, args=("history",))
 
 
 if __name__ == "__main__":

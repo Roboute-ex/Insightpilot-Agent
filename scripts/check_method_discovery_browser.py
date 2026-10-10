@@ -1,9 +1,9 @@
 """Real Chrome method catalog/causal acceptance using UI actions and uploaded synthetic CSV."""
 from __future__ import annotations
-import argparse,csv,json,time,urllib.request
+import argparse,csv,json,urllib.request
 from pathlib import Path
 from playwright.sync_api import sync_playwright
-from streamlit.proto.ForwardMsg_pb2 import ForwardMsg
+from check_workbench_browser import BrowserProbe
 
 
 def main():
@@ -18,48 +18,25 @@ def main():
          'fixture':{'rows':24,'control_rows':12,'treatment_rows':12,'expected_naive_difference':2,'expected_adjusted_effect':2,'formula':'10 + x + 2*treated + alternating +/-0.25; both groups share x=0..11'}}
  with sync_playwright() as pw:
   browser=pw.chromium.launch(executable_path=r'C:\Program Files\Google\Chrome\Application\chrome.exe',headless=True,chromium_sandbox=True)
-  record['chrome']=browser.version;contexts=[];errors=[];page=None;finished=[0]
+  record['chrome']=browser.version;probe=BrowserProbe(browser,args.output,record);page=None
+  errors=probe.errors
   def start_session():
-   nonlocal page,finished
-   context=browser.new_context(viewport={'width':1500,'height':1060},accept_downloads=True);contexts.append(context);page=context.new_page();finished=[0]
-   page.on('pageerror',lambda error:errors.append(str(error)))
-   def frame(raw):
-    if isinstance(raw,bytes):
-     message=ForwardMsg()
-     try:message.ParseFromString(raw)
-     except Exception:return
-     if message.WhichOneof('type')=='script_finished' and message.script_finished in (0,3):finished[0]+=1
-   page.on('websocket',lambda ws:ws.on('framereceived',frame))
-   page.goto(args.url);page.get_by_role('button',name='开始分析').wait_for(timeout=90000);idle()
-  def idle():
-   page.locator('[data-testid="stStatusWidget"]').wait_for(state='hidden',timeout=90000)
-   page.evaluate('()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))')
-  def action(name,fn,wait=True):
-   idle();old=finished[0];start=time.perf_counter();fn()
-   if wait:
-    end=time.perf_counter()+90
-    while finished[0]<=old:
-     if time.perf_counter()>end:raise TimeoutError(name+' did not finish a Streamlit rerun')
-     page.wait_for_timeout(20)
-   idle();record['operations'].append({'name':name,'seconds':time.perf_counter()-start});print(name,flush=True)
-  def click(label):action(label,lambda:page.get_by_role('button',name=label,exact=False).click())
+   nonlocal page
+   probe.session(args.url);page=probe.page
+  def idle():probe.idle()
+  def action(name,fn,wait=True):probe.action(name,fn,wait=wait)
+  def click(label):probe.click(label)
   def expand(label):action(label,lambda:page.get_by_text(label,exact=True).click())
-  def choose(label,value,wait=True):
-   if page.get_by_role('combobox',name=label,exact=True).input_value()==value:
-    record['operations'].append({'name':'already selected '+label+' '+value,'seconds':0});return
-   def operate():
-    loc=page.get_by_role('combobox',name=label,exact=True);loc.fill(value);loc.press('ArrowDown');page.get_by_role('option',name=value,exact=True).click()
-   action('select '+label+' '+value,operate,wait)
-  def question(value):
-   loc=page.get_by_role('textbox',name='你想分析什么？',exact=True)
-   action('question '+value,lambda:(loc.fill(value),loc.press('Enter')))
-  def capture(name):page.screenshot(path=str(args.output/(name+'.png')),full_page=True)
-  def body():return page.locator('body').inner_text()
+  def choose(label,value,wait=True):probe.choose(label,value,wait=wait)
+  def question(value):probe.question(value)
+  def capture(name):probe.capture(name)
+  def body():return probe.body()
+  def add_multi(label,value,wait=True):probe.multiselect(label,value,wait=wait)
   try:
    start_session();capture('01-home')
-   record['checks']['fresh_catalog_entry']=page.get_by_text('查看全部分析方法',exact=True).is_visible()
+   record['checks']['fresh_catalog_entry']=page.get_by_text('分析方法',exact=True).is_visible()
    record['checks']['no_modes']=not page.get_by_text('简洁演示',exact=True).count()
-   question('昨日订单量为什么下降？');expand('查看全部分析方法')
+   question('昨日订单量为什么下降？');expand('分析方法')
    record['catalog_buttons']=page.get_by_role('button',name='配置：').all_text_contents()
    record['checks']['all_ten_visible']=len(record['catalog_buttons'])==10
    page.get_by_role('button',name='配置：轻量因果探索').scroll_into_view_if_needed();capture('02-all-methods-causal')
@@ -72,28 +49,22 @@ def main():
    page.get_by_role('button',name='改用推荐方法').scroll_into_view_if_needed();capture('03-invalid-reason')
    click('改用推荐方法');record['checks']['accept_no_analysis']=not page.get_by_text('执行摘要',exact=True).count()
    click('开始分析');page.get_by_text('执行摘要',exact=True).wait_for(timeout=90000);idle()
-   record['checks']['order_run_completed']='分析已完成。以下内容由当前数据实际计算生成。' in body()
+   record['checks']['order_run_completed']=page.get_by_text('已完成',exact=True).count()>=1 and all(term in body() for term in ['执行摘要','昨日订单量为','核心指标表现'])
    page.get_by_text('执行摘要',exact=True).scroll_into_view_if_needed();capture('04-order-result')
    start_session();choose('数据来源','上传 CSV / Excel')
    action('upload deterministic 24-row CSV',lambda:page.locator('input[type="file"]').set_input_files(str(fixture)))
    page.get_by_role('textbox',name='你想分析什么？',exact=True).wait_for(timeout=90000);idle()
    question('控制协变量后，处理组与对照组的结果有多大差异？')
-   expand('查看全部分析方法');click('配置：轻量因果探索');choose('分析目标','轻量因果探索')
+   expand('分析方法');click('配置：轻量因果探索');choose('分析目标','轻量因果探索')
    choose('分组字段','不选择');choose('处理字段','group');choose('结果字段','outcome');choose('聚合方式','均值')
    # Mapping uses actual uploaded columns. No session-state or engine/result injection.
-   def add_multi(label,value,wait=True):
-    def operate():
-     loc=page.get_by_role('combobox',name=label,exact=True);loc.click();loc.fill(value);page.get_by_role('option',name=value,exact=True).click()
-    action('add '+label+' '+value,operate,wait)
-    page.get_by_text('输出 naive difference、回归调整结果和明确的适用边界。',exact=True).click()
-    idle()
    add_multi('指标字段','outcome');add_multi('协变量','covariate');click('确认当前字段映射')
    add_multi('控制变量','covariate',False);choose('处理组值','treatment',False);choose('对照组值','control',False)
    click('应用参数并更新建议')
    record['configured_body']=body();record['checks']['causal_ready']=page.get_by_role('button',name='开始分析').is_enabled()
    page.get_by_role('button',name='开始分析').scroll_into_view_if_needed();capture('05-causal-config-ready')
    click('开始分析');page.get_by_text('执行摘要',exact=True).wait_for(timeout=90000);idle()
-   record['checks']['causal_completed']='分析已完成。以下内容由当前数据实际计算生成。' in body()
+   record['checks']['causal_completed']=page.get_by_text('已完成',exact=True).count()>=1 and all(term in body() for term in ['执行摘要','=2.0000','n=24'])
    record['result_body']=body();page.get_by_text('执行摘要',exact=True).evaluate("el=>el.scrollIntoView({block:'start'})");capture('06-causal-result')
    action('result details',lambda:page.get_by_text('明细',exact=True).click());choose('选择结果明细表','adjusted_effect_summary');record['details_body']=body();capture('07-causal-details')
    action('report navigation',lambda:page.get_by_text('报告',exact=True).click())
@@ -131,7 +102,7 @@ def main():
    raise
   finally:
    (args.output/'checks.json').write_text(json.dumps(record,ensure_ascii=False,indent=2,default=str)+'\n',encoding='utf-8')
-   for context in contexts:context.close()
+   probe.close()
    browser.close()
  print(json.dumps(record['checks'],ensure_ascii=False));return 0
 if __name__=='__main__':raise SystemExit(main())

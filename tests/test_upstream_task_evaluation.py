@@ -131,7 +131,7 @@ render_quality_dimensions({'execution_status':'COMPLETED','goal_mode':'experimen
         for mode in ['demo','professional','developer']:
             app.selectbox[0].set_value(mode).run()
             assert not app.exception
-            assert any(QUALITY_NOTICE in item.value for item in app.caption)
+            assert not any(QUALITY_NOTICE in item.value for item in app.caption)
             rendered=' '.join(item.value for item in app.markdown)
             assert rendered.count('ip-summary-card')==5
             assert '统计前提尚未验证' in rendered
