@@ -7,17 +7,18 @@ on:
 jobs:
   validate:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        python-version: ['3.11']
+        python-version: ['3.11', '3.14']
     runs-on: ${{ matrix.os }}
     env:
       PYTHONUTF8: '1'
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install
@@ -32,3 +33,23 @@ jobs:
         run: python -m build
       - name: Verify wheel and YAML without source imports
         run: python scripts/check_distribution.py --dependency-mode project
+
+  langgraph:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - name: Install with optional LangGraph backend
+        run: python -m pip install -e ".[app,test,langgraph]"
+      - name: Confirm LangGraph is importable
+        run: python -c "import langgraph.graph"
+      - name: LangGraph task and fallback tests
+        run: python -m pytest tests/test_performance_task_core.py tests/test_langgraph_fallback.py -rs
+      - name: Real LangGraph backend matches rule-based results
+        run: python scripts/check_langgraph.py --output langgraph-check.json

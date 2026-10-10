@@ -10,6 +10,7 @@ from datetime import date, timedelta
 import re
 from typing import Any
 
+from insightpilot.analysis.groups import group_value_position
 from insightpilot.ingestion.mapping import ColumnMapping
 from insightpilot.metrics.definitions import stable_fingerprint
 from insightpilot.metrics.aggregation import metric_components
@@ -251,19 +252,25 @@ def _candidate(method_id, prepared, metadata, plan, question, *, selected=False)
                 missing.append(issue("GROUP_PREPARATION_REQUIRED", "尚无当前分组字段的完整可选组值摘要（最多100项）。", [group_column], "准备适合实验的分组字段", readiness="needs_preparation"))
             elif fact.get("unique_count", 0) < 2:
                 missing.append(issue("SINGLE_GROUP", "分组字段只有一个有效组，无法进行两组比较。", [group_column], "提供真实处理组和对照组", readiness="incompatible"))
+            positions: dict[str, int | None] = {}
             for role in ("control_value", "treatment_value"):
                 value = params.get(role)
                 if value is None and meta.get("builtin_scenario") and meta.get("columns") and mapping.get("table_name") == "experiments":
                     value = "control" if role == "control_value" else "treatment"
                 if value is None or value == "":
                     missing.append(issue("MISSING_"+role.upper(), "请明确选择对照组取值。" if role == "control_value" else "请明确选择处理组取值。", [role], "选择当前数据的真实组值", readiness="needs_parameters"))
-                elif fact.get("values_complete") and value not in values:
+                    continue
+                position = positions[role] = group_value_position(values, value)
+                if fact.get("values_complete") and position is None:
                     missing.append(issue("GROUP_VALUE_NOT_FOUND", f"指定组值 {value!r} 不存在于 {group_column}。", [group_column, role], "重新选择当前数据的组值", readiness="needs_parameters"))
-                elif value in values and metrics:
+                elif position is not None and metrics:
                     valid_counts = fact.get("valid_numeric_by_value", {}).get(metrics[0])
-                    if valid_counts is not None and valid_counts[values.index(value)] == 0:
+                    if valid_counts is not None and valid_counts[position] == 0:
                         missing.append(issue("GROUP_NO_VALID_OUTCOME", f"组 {value!r} 的结果列没有有效数值。", [group_column, metrics[0]], "修正组内结果数据", readiness="incompatible"))
-            if params.get("control_value") is not None and params.get("control_value") == params.get("treatment_value"):
+            control_value, treatment_value = params.get("control_value"), params.get("treatment_value")
+            same_text = control_value is not None and str(control_value) == str(treatment_value)
+            same_group = positions.get("control_value") is not None and positions.get("control_value") == positions.get("treatment_value")
+            if same_text or same_group:
                 missing.append(issue("IDENTICAL_GROUP_VALUES", "处理组和对照组不能相同。", ["control_value", "treatment_value"], "明确比较方向", readiness="needs_parameters"))
         if experiment:
             unit = params.get("statistical_unit") or mapping.get("statistical_unit")

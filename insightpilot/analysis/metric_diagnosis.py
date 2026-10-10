@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 from insightpilot.analysis.results import AnomalyResult, MetricComparisonResult
-from insightpilot.metrics.aggregation import metric_components
+from insightpilot.metrics.aggregation import is_non_additive_metric, metric_components
 from insightpilot.analysis.reuse import aggregate_once
 from insightpilot.observability.tracer import trace_stage
 
@@ -76,7 +76,7 @@ def _build_daily_series(frame: pd.DataFrame,metric_id: str,date_col: str) -> pd.
         grouped["sample_size"] = grouped[denominator]
         return grouped[[date_col, "metric_value", "sample_size"]]
     grouped = working.groupby(date_col,observed=True)[metric_id]
-    if metric_id.endswith("_rate") or metric_id.endswith("_latency") or metric_id in {"latency_ms", "watch_time", "stutter_rate"}:
+    if is_non_additive_metric(metric_id):
         values = grouped.mean()
     else:
         values = grouped.sum()

@@ -26,6 +26,6 @@ Streamlit 在 Export tab 提供 Manifest JSON 下载，内容仅存在当前会�
 
 ## 版本兼容
 
-当前 `manifest_version` 为 `1.0`。导入时检查主版本；不兼容版本返回清晰错误，不执行分析。
+当前 `manifest_version` 为 `1.1`（见 `insightpilot/reports/manifest.py` 的 `CURRENT_MANIFEST_VERSION`），可兼容读取 `1.0`。导入时检查主版本；不兼容版本返回清晰错误，不执行分析。
 
 source summary 与 table summary 会遮罩 URL 密码和敏感字段，但仍建议只使用 synthetic 或已授权的本地测试数据。

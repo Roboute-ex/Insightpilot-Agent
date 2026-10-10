@@ -29,3 +29,8 @@ METRIC_COMPONENTS: dict[str, tuple[tuple[str, str], ...]] = {
 def metric_components(metric: str, columns: Iterable[str]) -> tuple[str, str] | None:
     available = set(columns)
     return next((pair for pair in METRIC_COMPONENTS.get(metric, ()) if set(pair).issubset(available)), None)
+
+
+def is_non_additive_metric(metric: str) -> bool:
+    """Ratios and averages: when components are missing they may be averaged, never summed."""
+    return metric in METRIC_COMPONENTS or metric.endswith(("_rate", "_time", "_latency"))

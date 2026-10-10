@@ -13,6 +13,7 @@ def test_attribution_returns_ranked_contribution() -> None:
         "baseline_value",
         "change",
         "contribution_share",
+        "group_presence",
     ]
     assert result["contribution_share"].is_monotonic_decreasing
     assert result.iloc[0]["dimension_value"] == "South City"

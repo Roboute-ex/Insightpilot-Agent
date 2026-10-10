@@ -256,7 +256,6 @@ UI、CLI、workflow复用相同建议与原因。仅询问建议可用下列命�
 ## 中文日常使用手册（0.1.0）
 
 - [中文使用手册](docs/user_manual.md) · [操作速查卡](docs/quick_reference.md) · [教学 CSV 与字段说明](docs/examples/user_manual/README.md)
-- [离线 HTML 手册](reports/user-manual/20260930-125203/InsightPilot_Agent_使用手册_0.1.0.html) · [A4 PDF 手册](reports/user-manual/20260930-125203/InsightPilot_Agent_使用手册_0.1.0.pdf) · [两页速查卡 PDF](reports/user-manual/20260930-125203/InsightPilot_Agent_日常操作速查卡_0.1.0.pdf)
 - [文档事实与格式核对记录](docs/user_manual_verification.md)
 
-Markdown 操作路径更新于 2026-10-08。以上 HTML、PDF、速查卡 PDF 和手册截图仍为 2026-09-30 构建，本轮未重建，不包含当前结果旁返回与恢复流程。需要重建时，在项目根目录运行 `python docs/tools/build_user_manual.py --output-dir reports/user-manual/<新的构建目录>`，再按实际输出核对排版，不覆盖旧构建。
+Markdown 操作路径更新于 2026-10-08，以 Markdown 手册为准。离线 HTML 手册、A4 PDF 手册和两页速查卡 PDF 属于本地构建产物，位于被 `.gitignore` 忽略的 `reports/` 目录，不随仓库提交，因此这里不提供链接。现有本地构建为 2026-09-30 版本，不包含当前结果旁返回与恢复流程。需要时在项目根目录运行 `python docs/tools/build_user_manual.py --output-dir reports/user-manual/<新的构建目录>` 重新生成，再按实际输出核对排版，不覆盖旧构建。

@@ -10,7 +10,8 @@ from typing import Any, Callable
 import numpy as np
 import pandas as pd
 
-from insightpilot.analysis.causal_light import estimate_adjusted_effect
+from insightpilot.analysis.causal_light import TreatmentDirectionError, estimate_adjusted_effect, treatment_indicator
+from insightpilot.analysis.groups import GroupSelectionError, group_labels
 from insightpilot.analysis.experiments import analyze_ab_test
 from insightpilot.metrics.aggregation import metric_components
 from insightpilot.ingestion.mapping import ColumnMapping, normalize_column_mapping, suggest_column_mapping
@@ -434,9 +435,16 @@ def _execute_experiment_comparison(
         mapping.table_name or "", mapping.group_column or "", metric,
         _allowlist(tables, mapping.table_name or ""), control, treatment,
     )
+    try:
+        labels = group_labels(df[mapping.group_column], treatment_value=treatment, control_value=control)
+    except GroupSelectionError as exc:
+        return PlaybookExecutionResult(
+            playbook.playbook_id, playbook.display_name, "FAIL", parameters, [], [BASE_CAVEAT], {}, [], executed,
+            [*warnings, f"{exc}未执行显著性检验。"],
+        )
     summary = _run_template(engine, template, "experiment_summary", executed, warnings)
-    working = df[df[mapping.group_column].isin([control, treatment])].copy()
-    working[mapping.group_column] = working[mapping.group_column].map({control: "control", treatment: "treatment"})
+    working = df.assign(**{mapping.group_column: labels})
+    working = working[working[mapping.group_column].notna()].copy()
     result_tables: dict[str, pd.DataFrame] = {"experiment_summary": summary}
     findings: list[str] = []
     try:
@@ -459,10 +467,9 @@ def _execute_experiment_comparison(
         dimension = parameters.get("dimension")
         if dimension:
             stratified_rows: list[dict[str, Any]] = []
-            for value, subset in df.groupby(str(dimension), dropna=False):
+            for value, subset in df.assign(**{mapping.group_column: labels}).groupby(str(dimension), dropna=False):
                 cancellation_checkpoint()
-                stratum = subset[subset[mapping.group_column].isin([control, treatment])].copy()
-                stratum[mapping.group_column] = stratum[mapping.group_column].map({control: "control", treatment: "treatment"})
+                stratum = subset[subset[mapping.group_column].notna()].copy()
                 try:
                     stratum_result = analyze_ab_test(
                         stratum,
@@ -517,7 +524,14 @@ def _execute_causal_exploration(
     working = df.copy()
     treatment_column = mapping.treatment_column or ""
     outcome_column = mapping.outcome_column or ""
-    working[treatment_column] = working[treatment_column].map({control: "control", treatment: "treatment"})
+    try:
+        indicator = treatment_indicator(working[treatment_column], treatment_value=treatment, control_value=control)
+    except TreatmentDirectionError as exc:
+        return PlaybookExecutionResult(
+            playbook.playbook_id, playbook.display_name, "FAIL", parameters, [], [BASE_CAVEAT, CAUSAL_CAVEAT], {}, [], [],
+            [f"{exc}未执行轻量因果估计。"], metadata={"uses_pandas_fallback": True},
+        )
+    working[treatment_column] = indicator.map({1.0: "treatment", 0.0: "control"})
     working = working[working[treatment_column].notna()]
     outcome = pd.to_numeric(working[outcome_column], errors="coerce")
     treated = outcome[working[treatment_column] == "treatment"].dropna()

@@ -5,6 +5,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from insightpilot.analysis.groups import GroupSelectionError, group_labels
+
 try:
     from sklearn.linear_model import LinearRegression, LogisticRegression
 except ImportError:  # pragma: no cover - dependency is declared for normal use
@@ -12,11 +14,38 @@ except ImportError:  # pragma: no cover - dependency is declared for normal use
     LogisticRegression = None
 
 
-def _treatment_as_binary(series: pd.Series) -> pd.Series:
+_TREATMENT_TOKENS = {"1", "true", "treated", "treatment", "yes"}
+_CONTROL_TOKENS = {"0", "false", "control", "untreated", "no"}
+
+
+class TreatmentDirectionError(GroupSelectionError):
+    """Raised when treatment and control groups cannot be identified without guessing."""
+
+
+def treatment_indicator(
+    series: pd.Series,
+    *,
+    treatment_value: object | None = None,
+    control_value: object | None = None,
+) -> pd.Series:
+    """Return 1/0 for treatment/control and NaN for rows outside the two selected groups."""
+
+    if treatment_value is not None or control_value is not None:
+        try:
+            labels = group_labels(series, treatment_value=treatment_value, control_value=control_value)
+        except GroupSelectionError as exc:
+            raise TreatmentDirectionError(str(exc)) from exc
+        return labels.map({"treatment": 1.0, "control": 0.0}).astype(float)
     if series.dtype == bool:
-        return series.astype(int)
-    lowered = series.astype(str).str.lower()
-    return lowered.isin({"1", "true", "treated", "treatment", "yes"}).astype(int)
+        return series.astype(float)
+    if pd.api.types.is_numeric_dtype(series) and set(series.unique()) <= {0, 1}:
+        return series.astype(float)
+    lowered = series.astype(str).str.strip().str.lower()
+    observed = set(lowered.unique())
+    if observed <= _TREATMENT_TOKENS | _CONTROL_TOKENS and observed & _TREATMENT_TOKENS and observed & _CONTROL_TOKENS:
+        return lowered.isin(_TREATMENT_TOKENS).astype(float)
+    shown = "、".join(sorted(map(str, series.astype(str).unique()))[:5])
+    raise TreatmentDirectionError(f"处理字段取值（{shown}）无法确定哪一组是处理组，请明确选择处理组与对照组取值。")
 
 
 def _linear_effect(x: pd.DataFrame, y: pd.Series, treatment_col: str) -> float:
@@ -50,8 +79,14 @@ def estimate_adjusted_effect(
     outcome_col: str,
     covariates: list[str],
     *, include_propensity: bool = False,
+    treatment_value: object | None = None,
+    control_value: object | None = None,
 ) -> dict[str, object]:
-    """Estimate exploratory treatment effect with regression and simple weighting."""
+    """Estimate exploratory treatment effect with regression and simple weighting.
+
+    When ``treatment_value``/``control_value`` are given they define the comparison
+    direction; otherwise only unambiguous binary encodings are accepted.
+    """
 
     required = {treatment_col, outcome_col, *covariates}
     missing = required - set(df.columns)
@@ -64,9 +99,13 @@ def estimate_adjusted_effect(
     working = working.replace([np.inf, -np.inf], np.nan).dropna()
     if working.empty:
         raise ValueError("没有完整有效的处理、结果及协变量样本。")
-    treatment = _treatment_as_binary(working[treatment_col]).rename("treatment_indicator")
+    indicator = treatment_indicator(working[treatment_col], treatment_value=treatment_value, control_value=control_value)
+    selected = indicator.notna()
+    excluded_rows = int((~selected).sum())
+    working = working.loc[selected]
+    treatment = indicator.loc[selected].astype(int).rename("treatment_indicator")
     if treatment.nunique() != 2:
-        raise ValueError("因果探索需要两个有效处理组。")
+        raise TreatmentDirectionError("因果探索需要两个有效处理组；所选处理组或对照组取值在数据中不存在。")
     outcome = pd.to_numeric(working[outcome_col], errors="coerce")
     covariate_frame = pd.get_dummies(working[covariates], drop_first=True, dtype=float)
     x = pd.concat([treatment, covariate_frame], axis=1)
@@ -84,6 +123,8 @@ def estimate_adjusted_effect(
         "需确认协变量先于处理发生，并检查两组协变量重叠性；回归调整不能证明因果。",
         "倾向评分加权默认关闭，只有显式 include_propensity=True 才运行可选方法。",
     ]
+    if excluded_rows:
+        caveats.append(f"排除 {excluded_rows} 行不属于所选处理组或对照组的记录。")
     return {
         "estimated_effect": adjusted_effect,
         "naive_difference": naive_difference,

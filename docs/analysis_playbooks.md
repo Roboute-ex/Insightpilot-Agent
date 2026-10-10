@@ -8,15 +8,20 @@
 
 不传 `playbook_id` 时保留 当前整合版 自动工作流。选择 `auto` 时，系统根据 goal mode、mapping 完整度和字段角色排序推荐结果。
 
-## 七个内置 Playbook
+## 十个内置 Playbook
+
+以下与 `PlaybookRegistry` 当前注册内容一致；可用 `python -m insightpilot.cli --list-playbooks` 核对。
 
 - `data_profile`：表规模、dtype、缺失率、唯一值、重复行和数值分布。
 - `metric_trend`：时间聚合、变化率、滚动均值和异常信号。
 - `period_comparison`：当前周期与对比周期的绝对和相对变化。
 - `dimension_contribution`：维度贡献值、占比、排名和 Others。
 - `experiment_comparison`：组均值或比例比较、lift、p-value 与置信区间。
-- `causal_exploration`：naive difference、回归调整和适用边界。
+- `causal_exploration`：naive difference、回归调整和适用边界；处理组与对照组取值须明确选择。
 - `periodic_summary`：组合 profile、trend 和 top dimensions。
+- `semantic_metric_query`：基于受控语义模型的指标、维度、筛选与多表连接查询，需审批后执行。
+- `funnel_analysis`：访问、浏览、加购、提交、支付五阶段的时序漏斗，按会话去重。
+- `cohort_retention`：按注册周与活动周统计去重客户的队列留存矩阵。
 
 ## Requirements 与 Mapping
 

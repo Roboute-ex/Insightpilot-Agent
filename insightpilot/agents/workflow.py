@@ -7,13 +7,15 @@ from insightpilot.performance_tasks import cancellation_checkpoint
 import importlib.util
 from typing import Any, Callable
 
+import numpy as np
 import pandas as pd
 
 from insightpilot.analysis.anomaly import detect_metric_anomaly
 from insightpilot.analysis.metric_diagnosis import _daily_series
 from insightpilot.metrics.aggregation import metric_components
 from insightpilot.analysis.attribution import dimension_contribution
-from insightpilot.analysis.causal_light import estimate_adjusted_effect
+from insightpilot.analysis.causal_light import TreatmentDirectionError, estimate_adjusted_effect
+from insightpilot.analysis.groups import GroupSelectionError, group_labels
 from insightpilot.analysis.experiments import analyze_ab_test
 from insightpilot.analysis.package_builder import build_analysis_result_package, deduplicate_findings, findings_from_package
 from insightpilot.analysis.results import AnalysisResultPackage
@@ -111,6 +113,26 @@ def _append_unique(items: list[str], new_items: list[str]) -> None:
     for item in new_items:
         if item and item not in items:
             items.append(item)
+
+
+def _selected_groups(state: WorkflowState) -> tuple[Any, Any]:
+    """Control and treatment values chosen by the user; built-in scenarios default to control/treatment."""
+    return state.playbook_parameters.get("control_value", "control"), state.playbook_parameters.get("treatment_value", "treatment")
+
+
+def _selected_groups_missing(state: WorkflowState, frame: pd.DataFrame, column: str) -> bool:
+    control, treatment = _selected_groups(state)
+    try:
+        group_labels(frame[column], treatment_value=treatment, control_value=control)
+    except GroupSelectionError as exc:
+        state.errors.append(f"{exc}未执行分析。")
+        return True
+    return False
+
+
+def _format_relative_change(value: Any) -> str:
+    number = float(value) if value is not None else float("nan")
+    return f"{number:.2%}" if np.isfinite(number) else "不可计算（基准为零或缺失）"
 
 
 def _metadata_from_tables(tables: dict[str, pd.DataFrame]) -> dict[str, dict[str, Any]]:
@@ -863,7 +885,7 @@ def _run_metric_diagnosis_node(
         (
             f"{metric} 当前值为 {float(anomaly.get('current_value', 0.0)):.2f}，相对前 7 日均值 "
             f"{float(anomaly.get('baseline_value', 0.0)):.2f} 变化 "
-            f"{float(anomaly.get('relative_change', 0.0)):.2%}，severity={anomaly.get('severity', 'UNKNOWN')}。"
+            f"{_format_relative_change(anomaly.get('relative_change', 0.0))}，severity={anomaly.get('severity', 'UNKNOWN')}。"
         ),
         f"维度贡献排序显示 {top_city} 是主要变化来源之一，建议优先复核该维度的流量与转化链路。",
         "订单类问题建议按曝光、点击率、转化率、支付成功率逐层拆解，避免只看单一结果指标。",
@@ -909,9 +931,8 @@ def _run_growth_trend_node(
     )
     state.add_route("run_anomaly")
     anomaly = detect_metric_anomaly(metric_frame, metric) if not metric_frame.empty else {}
-    relative_change = float(anomaly.get("relative_change", 0.0))
     findings = [
-        f"{metric} 相对前 7 日均值变化 {relative_change:.2%}，用于判断 synthetic 趋势方向。",
+        f"{metric} 相对前 7 日均值变化 {_format_relative_change(anomaly.get('relative_change', 0.0))}，用于判断 synthetic 趋势方向。",
         "增长/趋势分析当前采用描述性趋势摘要，并保留异常检测作为辅助信号。",
         REPORT_LIMITATION,
     ]
@@ -940,6 +961,8 @@ def _run_experiment_node(
         return state
 
     experiments = tables["experiments"]
+    if _selected_groups_missing(state, experiments, "group"):
+        return state
     state.add_route("run_experiment")
     _record_operation(
         state,
@@ -947,13 +970,14 @@ def _run_experiment_node(
         "analyze_ab_test(experiments, group, completion_rate, mean)",
         len(experiments),
     )
-    ab_result = analyze_ab_test(experiments, "group", "completion_rate", metric_type="mean")
+    control, treatment = _selected_groups(state)
+    ab_result = analyze_ab_test(experiments, "group", "completion_rate", metric_type="mean", control_value=control, treatment_value=treatment)
 
     strata = (
         experiments.groupby(["user_segment", "group"])["completion_rate"]
         .mean()
         .unstack("group")
-        .assign(lift=lambda frame: frame["treatment"] - frame["control"])
+        .assign(lift=lambda frame: frame[treatment] - frame[control])
         .reset_index()
     )
     sample_size = ab_result["sample_size"]
@@ -1020,7 +1044,7 @@ def _run_content_performance_node(
         "结合 experiments 表验证策略变化是否带来稳定提升。",
     ]
     artifacts: dict[str, Any] = {"content_summary": summary.round(6).to_dict(orient="records")}
-    if "experiments" in tables:
+    if "experiments" in tables and not _selected_groups_missing(state, tables["experiments"], "group"):
         state.add_route("run_experiment_optional")
         _record_operation(
             state,
@@ -1028,7 +1052,8 @@ def _run_content_performance_node(
             "analyze_ab_test(experiments, group, completion_rate, mean)",
             len(tables["experiments"]),
         )
-        artifacts["optional_ab_test"] = analyze_ab_test(tables["experiments"], "group", "completion_rate", metric_type="mean")
+        control, treatment = _selected_groups(state)
+        artifacts["optional_ab_test"] = analyze_ab_test(tables["experiments"], "group", "completion_rate", metric_type="mean", control_value=control, treatment_value=treatment)
     _set_node_outputs(
         state,
         summary="内容表现摘要已完成，包含内容类型表现和可选实验摘要。",
@@ -1070,10 +1095,11 @@ def _run_live_quality_node(
     top_device = contributions.get("device", [{}])[0].get("dimension_value", "unknown")
     top_network = contributions.get("network_type", [{}])[0].get("dimension_value", "unknown")
     findings = [
-        f"卡顿率相对前 7 日均值变化 {float(stutter['relative_change']):.2%}，需要按体验风险理解该上升信号。",
+        f"卡顿率相对前 7 日均值变化 {_format_relative_change(stutter['relative_change'])}（{stutter['direction']}，异常等级 {stutter['severity']}）"
+        + ("，卡顿率越低越好，该变化属于体验恶化信号。" if stutter.get("is_adverse") else "。"),
         (
-            f"观看时长变化 {float(watch_time['relative_change']):.2%}，"
-            f"互动率变化 {float(interaction_rate['relative_change']):.2%}。"
+            f"观看时长变化 {_format_relative_change(watch_time['relative_change'])}，"
+            f"互动率变化 {_format_relative_change(interaction_rate['relative_change'])}。"
         ),
         f"贡献排序显示 {top_device} 与 {top_network} 是优先排查维度。",
         "体验质量问题建议同时观察设备、网络类型、地区和时段，避免把相关性直接解释为因果。",
@@ -1108,6 +1134,8 @@ def _run_causal_exploration_node(
         return state
 
     experiments = tables["experiments"]
+    if _selected_groups_missing(state, experiments, "group"):
+        return state
     state.add_route("run_causal_light")
     state.selected_metrics = ["completion_rate"]
     _record_operation(
@@ -1116,11 +1144,14 @@ def _run_causal_exploration_node(
         "estimate_adjusted_effect(experiments, group, completion_rate, covariates)",
         len(experiments),
     )
+    control, treatment = _selected_groups(state)
     effect = estimate_adjusted_effect(
         experiments,
         "group",
         "completion_rate",
         ["historical_activity", "historical_revenue", "city", "channel", "user_segment"],
+        treatment_value=treatment,
+        control_value=control,
     )
     findings = [
         (
@@ -1173,7 +1204,7 @@ def _run_periodic_report_node(
     )
     anomaly = detect_metric_anomaly(summary_frame, metric) if not summary_frame.empty else {}
     findings = [
-        f"{metric} 当前值为 {float(anomaly.get('current_value', 0.0)):.2f}，相对前 7 日均值变化 {float(anomaly.get('relative_change', 0.0)):.2%}。",
+        f"{metric} 当前值为 {float(anomaly.get('current_value', 0.0)):.2f}，相对前 7 日均值变化 {_format_relative_change(anomaly.get('relative_change', 0.0))}。",
         "当前为基础描述性汇总，如需诊断可补充更明确的目标指标和维度。",
         REPORT_LIMITATION,
     ]
@@ -1302,7 +1333,7 @@ def _run_generic_analysis_node(
                 artifacts["generic_anomaly"] = _round_value(anomaly)
                 state.intermediate_results.setdefault("result_tables", {})["anomalies"] = pd.DataFrame([anomaly])
                 findings.append(
-                    f"{metric_col} 最新日期相对前 7 日均值变化 {float(anomaly['relative_change']):.2%}，severity={anomaly['severity']}。"
+                    f"{metric_col} 最新日期相对前 7 日均值变化 {_format_relative_change(anomaly['relative_change'])}，severity={anomaly['severity']}。"
                 )
             else:
                 findings.append(f"{metric_col} 已按 {date_col} 聚合，但可用日期少于 8 个，暂不输出异常结论。")
@@ -1348,13 +1379,15 @@ def _run_generic_analysis_node(
             group_col, metric_col = _find_experiment_columns(df)
         if group_col and metric_col:
             state.add_route("run_generic_experiment")
-            control = state.playbook_parameters.get("control_value", "control")
-            treatment = state.playbook_parameters.get("treatment_value", "treatment")
-            values = set(df[group_col].dropna().unique())
-            if {control, treatment}.issubset(values):
+            control, treatment = _selected_groups(state)
+            try:
+                labels = group_labels(df[group_col], treatment_value=treatment, control_value=control)
+            except GroupSelectionError:
+                labels = None
+            if labels is not None:
                 unit = state.playbook_parameters.get("statistical_unit") or applied_mapping.statistical_unit
-                ab_result = analyze_ab_test(df, group_col, metric_col, metric_type=str(state.playbook_parameters.get("metric_type", "mean")),
-                    statistical_unit=unit, control_value=control, treatment_value=treatment,
+                ab_result = analyze_ab_test(df.assign(**{group_col: labels}), group_col, metric_col, metric_type=str(state.playbook_parameters.get("metric_type", "mean")),
+                    statistical_unit=unit, control_value="control", treatment_value="treatment",
                     confidence_level=float(state.playbook_parameters.get("confidence_level", .95)))
                 artifacts["generic_ab_test"] = _round_value(ab_result)
                 findings.extend(
@@ -1385,6 +1418,8 @@ def _run_generic_analysis_node(
                         applied_mapping.treatment_column,
                         applied_mapping.outcome_column,
                         covariates,
+                        treatment_value=state.playbook_parameters.get("treatment_value"),
+                        control_value=state.playbook_parameters.get("control_value"),
                     )
                     artifacts["generic_causal_light"] = _round_value(effect)
                     findings.append(
@@ -1394,6 +1429,9 @@ def _run_generic_analysis_node(
                         f"adjusted_effect={float(effect['adjusted_effect']):.4f}，sample_size={effect['sample_size']}。"
                     )
                     caveats.extend(str(item) for item in effect.get("caveats", []))
+                except TreatmentDirectionError as exc:
+                    state.errors.append(f"{exc}未执行轻量因果估计。")
+                    caveats.append(state.errors[-1])
                 except Exception as exc:
                     findings.append("已识别 treatment/outcome，但轻量因果估计执行失败，已退化为 schema profile。")
                     caveats.append(f"轻量因果估计失败：{exc}")
